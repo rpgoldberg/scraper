@@ -1,0 +1,9 @@
+# Act configuration for local GitHub Actions testing
+# Use medium-sized Ubuntu image (good balance of size and compatibility)
+-P ubuntu-latest=catthehacker/ubuntu:act-latest
+
+# Reuse containers between runs for faster iteration
+--reuse
+
+# Pull image if not present
+--pull=false
