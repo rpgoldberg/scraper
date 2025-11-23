@@ -185,7 +185,7 @@ export const SITE_CONFIGS = {
   mfc: {
     imageSelector: '.item-picture .main img',
     manufacturerSelector: '.data-field .data-label:contains("Company") + .data-value .item-entries a span[switch]',
-    nameSelector: '.data-field .data-label:contains("Character") + .data-value .item-entries a span[switch]',
+    nameSelector: '.data-field .data-label:contains("Title") + .data-value .item-entries a span[switch]',
     scaleSelector: '.item-scale',
     cloudflareDetection: {
       titleIncludes: [
@@ -590,12 +590,49 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
     }
     
     console.log('[GENERIC SCRAPER] Extracting data...');
-    
+
+    // Check for MFC authentication requirement (NSFW content)
+    const pageTitle = await page.title();
+    const bodyText = await page.evaluate(() => document.body.innerText);
+
+    console.log('[DEBUG] Page title:', pageTitle);
+    console.log('[DEBUG] Body text preview:', bodyText.substring(0, 200));
+
+    // Detect MFC 404 page (could be truly not found OR NSFW requiring auth)
+    if (url.includes('myfigurecollection.net') &&
+        (pageTitle.includes('Error') || pageTitle.includes('404')) &&
+        (bodyText.includes('404') || bodyText.includes('Not Found') || bodyText.includes('not found'))) {
+
+      // Provide context-aware error message based on whether auth was provided
+      if (config.mfcAuth) {
+        console.log('[GENERIC SCRAPER] MFC 404 page detected WITH authentication - auth issue or invalid item');
+        throw new Error('MFC_ITEM_NOT_ACCESSIBLE: Item not found despite authentication. This could mean: (1) The item ID is invalid, (2) Your MFC account has insufficient permissions (e.g., SFW-only account trying to access NSFW content), OR (3) Your session cookies have expired or been invalidated. Try refreshing your cookies from your browser.');
+      } else {
+        console.log('[GENERIC SCRAPER] MFC 404 page detected WITHOUT authentication - could be invalid or NSFW');
+        throw new Error('MFC_ITEM_NOT_ACCESSIBLE: Item not found. This could mean: (1) The item ID is invalid, OR (2) This is NSFW content requiring MFC authentication. If you believe this item exists and is NSFW, provide your MFC session cookies via the mfcAuth config parameter to access it. Note: MFC returns a generic 404 for NSFW content when not authenticated.');
+      }
+    }
+
     // Extract data using page.evaluate
     const scrapedData = await page.evaluate((selectors) => {
       const data: any = {};
-      
+      const debugInfo: any = { availableFields: [] };
+
       try {
+        // DEBUG: Log all available data fields on the page
+        const allDataFields = Array.from(document.querySelectorAll('.data-field'));
+        allDataFields.forEach(field => {
+          const label = field.querySelector('.data-label');
+          const value = field.querySelector('.data-value');
+          if (label && value) {
+            debugInfo.availableFields.push({
+              label: label.textContent?.trim(),
+              valuePreview: value.textContent?.trim().substring(0, 50)
+            });
+          }
+        });
+        console.log('[DEBUG] Available MFC fields:', JSON.stringify(debugInfo.availableFields, null, 2));
+
         // Extract image
         if (selectors.imageSelector) {
           const imageElement = document.querySelector(selectors.imageSelector) as HTMLImageElement;
@@ -630,22 +667,60 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
         // Extract name (special handling for MFC)
         if (selectors.nameSelector) {
           if (selectors.nameSelector.includes(':contains(')) {
-            // Handle MFC-specific Character field
+            // MFC uses different fields depending on origin type:
+            // - Licensed characters: "Character" field
+            // - Original characters: "Title" field
             const dataFields = Array.from(document.querySelectorAll('.data-field'));
+            console.log('[DEBUG] Looking for name in Character or Title field...');
+            let nameFound = false;
+
+            // Try Character field first (most common for licensed figures)
             for (const field of dataFields) {
               const label = field.querySelector('.data-label');
               if (label && label.textContent && label.textContent.trim() === 'Character') {
+                console.log('[DEBUG] Found Character field');
                 const nameElement = field.querySelector('.item-entries a span[switch]') as HTMLElement;
                 if (nameElement && nameElement.textContent) {
                   data.name = nameElement.textContent.trim();
+                  console.log('[DEBUG] Extracted name from Character:', data.name);
+                  nameFound = true;
                   break;
                 }
+              }
+            }
+
+            // Fallback to Title field (for original characters)
+            if (!nameFound) {
+              console.log('[DEBUG] Character field not found, trying Title...');
+              for (const field of dataFields) {
+                const label = field.querySelector('.data-label');
+                if (label && label.textContent && label.textContent.trim() === 'Title') {
+                  console.log('[DEBUG] Found Title field');
+                  const nameElement = field.querySelector('.item-entries a span[switch]') as HTMLElement;
+                  if (nameElement && nameElement.textContent) {
+                    data.name = nameElement.textContent.trim();
+                    console.log('[DEBUG] Extracted name from Title:', data.name);
+                    nameFound = true;
+                    break;
+                  }
+                }
+              }
+            }
+
+            // Last resort: use h1
+            if (!nameFound) {
+              console.log('[DEBUG] Neither Character nor Title found, trying h1...');
+              const h1 = document.querySelector('h1');
+              if (h1 && h1.textContent) {
+                data.name = h1.textContent.trim();
+                console.log('[DEBUG] Used h1 as name:', data.name);
               }
             }
           } else {
             const nameElement = document.querySelector(selectors.nameSelector) as HTMLElement;
             if (nameElement && nameElement.textContent) {
               data.name = nameElement.textContent.trim();
+              console.log('[DEBUG] Extracted name via direct selector:', data.name);
             }
           }
         }
@@ -727,8 +802,11 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
       'Unknown argument',
       'ENOSPC',
       'HTTP 404',
-      'HTTP 500', 
-      'HTTP 429'
+      'HTTP 500',
+      'HTTP 429',
+      // User-facing errors that should reach the user
+      'MFC_ITEM_NOT_ACCESSIBLE',
+      'NSFW_AUTH_REQUIRED'
     ];
 
     const isCriticalError = criticalErrors.some(errorType => 
@@ -767,8 +845,14 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
 }
 
 // Convenience function for MFC scraping
-export async function scrapeMFC(url: string): Promise<ScrapedData> {
-  return scrapeGeneric(url, SITE_CONFIGS.mfc);
+export async function scrapeMFC(url: string, mfcAuth?: any): Promise<ScrapedData> {
+  const config: ScrapeConfig = { ...SITE_CONFIGS.mfc };
+  if (mfcAuth) {
+    // Parse JSON string if needed, then wrap in sessionCookies structure
+    const cookiesObj = typeof mfcAuth === 'string' ? JSON.parse(mfcAuth) : mfcAuth;
+    config.mfcAuth = { sessionCookies: cookiesObj };
+  }
+  return scrapeGeneric(url, config);
 }
 
 // Graceful shutdown

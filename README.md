@@ -153,7 +153,7 @@ Get service version information for version management.
 **Response:**
 ```json
 {
-  "name": "page-scraper",
+  "name": "scraper",
   "version": "1.0.0",
   "status": "healthy"
 }
@@ -203,7 +203,7 @@ x-admin-token: <admin-token-value>
 
 ## 🧪 Testing
 
-The page-scraper includes comprehensive test coverage with enhanced testing infrastructure and containerized test execution.
+The scraper includes comprehensive test coverage with enhanced testing infrastructure and containerized test execution.
 
 ### Test Coverage Overview
 
@@ -229,7 +229,6 @@ src/__tests__/
 │   └── cloudflareDetection.test.ts   # Enhanced Cloudflare detection
 └── integration/
     ├── scraperRoutes.test.ts         # API endpoint tests
-    ├── versionManagerRegistration.test.ts # Version manager integration
     └── inter-service/
         └── backendCommunication.test.ts   # Cross-service communication
 ```
@@ -245,10 +244,8 @@ src/__tests__/
 - **Performance**: Response time benchmarks and efficiency tests
 - **Cloudflare Detection**: Enhanced Cloudflare bypass validation and fuzzy matching
 
-**Integration Tests (3 suites):**
+**Integration Tests (1 suite):**
 - **API Routes**: All HTTP endpoints with various scenarios
-- **Version Manager Registration**: Service registration and discovery testing
-- **Inter-Service Communication**: Cross-service communication validation
 
 ### Key Testing Features
 
@@ -399,7 +396,6 @@ module.exports = {
 - Enhanced test file discovery and coverage reporting
 - Added containerized testing with `test-container-coverage.sh` script
 - Enhanced Cloudflare detection testing with fuzzy matching validation
-- Comprehensive version manager integration testing
 - Cross-service communication validation tests
 
 ### Performance Benchmarks
@@ -510,6 +506,26 @@ See `TESTING.md` for comprehensive testing documentation including:
 
 ## Development
 
+### Environment Setup
+
+**Configuration Files:**
+- `.env.example` - Template showing all environment variables
+- `.env` - Your local configuration (gitignored, never commit this!)
+
+**Quick Start:**
+```bash
+# Copy example (optional - defaults work for most cases)
+cp .env.example .env
+
+# Scraper typically works with defaults - no secrets required!
+```
+
+See `.env.example` for all configuration options including:
+- Server port configuration
+- Puppeteer Chrome path (for CI/CD)
+- Admin token (for /reset-pool endpoint)
+- Debug logging settings
+
 ### Local Development
 
 ```bash
@@ -558,16 +574,16 @@ The service uses a multi-stage Dockerfile with the following build targets:
 
 ```bash
 # Development (with hot reload, port 3010)
-docker build --target development -t page-scraper:dev .
-docker run -p 3010:3010 -e PORT=3010 --shm-size=2gb page-scraper:dev
+docker build --target development -t scraper:dev .
+docker run -p 3010:3010 -e PORT=3010 --shm-size=2gb scraper:dev
 
 # Test environment (port 3005)
-docker build --target test -t page-scraper:test .
-docker run -p 3005:3005 -e PORT=3005 --shm-size=2gb page-scraper:test
+docker build --target test -t scraper:test .
+docker run -p 3005:3005 -e PORT=3005 --shm-size=2gb scraper:test
 
 # Production (default, port 3000)
-docker build -t page-scraper:prod .
-docker run -p 3000:3000 -e PORT=3000 --shm-size=2gb page-scraper:prod
+docker build -t scraper:prod .
+docker run -p 3000:3000 -e PORT=3000 --shm-size=2gb scraper:prod
 ```
 
 **Available stages:**
@@ -580,71 +596,24 @@ docker run -p 3000:3000 -e PORT=3000 --shm-size=2gb page-scraper:prod
 **Note**: `--shm-size=2gb` is required for Puppeteer to avoid memory issues with Chromium.
 
 ### Environment Variables
+
+See `.env.example` for complete configuration template.
+
+**Required:**
 - `PORT`: Server port (default: 3000, dev: 3010, test: 3005)
 - `NODE_ENV`: Environment mode (development, test, production)
-- `ADMIN_TOKEN`: Authentication token for protected endpoints (required for /reset-pool in non-production)
-- `VERSION_MANAGER_URL`: Full URL to version manager service (optional)
-- `VERSION_MANAGER_HOST`: Version manager hostname (default: 'version-manager')
-- `VERSION_MANAGER_PORT`: Version manager port (default: '3001')
 
-## Version Manager Integration
+**Optional:**
+- `PUPPETEER_EXECUTABLE_PATH`: Custom Chrome/Chromium executable path
+  - Useful for CI/CD environments or custom browser installations
+  - Example: `/usr/bin/chromium-browser`
+- `ADMIN_TOKEN`: Authentication token for admin endpoints
+  - Required for `/reset-pool` endpoint in non-production environments
+  - Simple string token for basic protection
 
-The page-scraper service automatically registers itself with the version manager on startup. This enables:
-
-- **Service Discovery**: Other services can discover page-scraper endpoints
-- **Version Compatibility**: Validation of service version combinations
-- **Health Monitoring**: Centralized service health tracking
-
-### Registration Process
-
-On startup, the service automatically:
-1. Registers with the version manager at the configured URL
-2. Provides service metadata including version and endpoints
-3. Logs registration success/failure (service continues if registration fails)
-
-### Configuration
-
-Version manager integration is configured via environment variables:
-
-```bash
-# Default configuration (works with Docker Compose)
-VERSION_MANAGER_HOST=version-manager
-VERSION_MANAGER_PORT=3001
-
-# Or use full URL
-VERSION_MANAGER_URL=http://version-manager:3001
-
-# Custom configuration example
-VERSION_MANAGER_HOST=custom-version-manager
-VERSION_MANAGER_PORT=4001
-```
-
-### Registration Data
-
-The service registers with the following metadata:
-
-```json
-{
-  "serviceId": "page-scraper",
-  "name": "Page Scraper Service", 
-  "version": "1.0.0",
-  "endpoints": {
-    "health": "http://page-scraper:3000/health",
-    "version": "http://page-scraper:3000/version",
-    "scrape": "http://page-scraper:3000/scrape",
-    "scrapeMfc": "http://page-scraper:3000/scrape/mfc",
-    "configs": "http://page-scraper:3000/configs"
-  },
-  "dependencies": {}
-}
-```
-
-### Failure Handling
-
-If version manager registration fails:
-- Warning messages are logged
-- Service continues normal operation
-- Registration can be retried manually via API call
+**Debug Logging:**
+- `DEBUG`: Enable debug namespaces (e.g., `scraper:*`, `scraper:mfc`, `scraper:browser`)
+- `SERVICE_AUTH_TOKEN_DEBUG`: Show partial tokens in logs for debugging (default: false)
 
 ## Integration
 
@@ -652,7 +621,7 @@ Update your main application to call this service instead of direct scraping:
 
 ```javascript
 // MFC scraping (use environment-specific URL)
-const scraperUrl = process.env.SCRAPER_SERVICE_URL || 'http://page-scraper:3000';
+const scraperUrl = process.env.SCRAPER_SERVICE_URL || 'http://scraper:3000';
 const response = await fetch(`${scraperUrl}/scrape/mfc`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
