@@ -193,7 +193,8 @@ describe('Scraper Routes Integration Tests', () => {
       });
 
       expect(mockedGenericScraper.scrapeMFC).toHaveBeenCalledWith(
-        'https://myfigurecollection.net/item/123456'
+        'https://myfigurecollection.net/item/123456',
+        undefined
       );
     });
 
@@ -277,7 +278,7 @@ describe('Scraper Routes Integration Tests', () => {
 
       expect(response.body).toEqual({
         success: false,
-        message: 'Scraping failed',
+        message: 'MFC scraping failed',
         error: 'MFC scraping failed',
       });
     });

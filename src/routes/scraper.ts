@@ -50,7 +50,7 @@ router.post('/scrape', async (req, res) => {
     console.error('[SCRAPER API] Error:', error);
     res.status(500).json({
       success: false,
-      message: 'Scraping failed',
+      message: error.message || 'Scraping failed',
       error: error.message
     });
   }
@@ -59,17 +59,17 @@ router.post('/scrape', async (req, res) => {
 // MFC-specific endpoint (convenience wrapper)
 router.post('/scrape/mfc', async (req, res) => {
   console.log('[SCRAPER API] Received MFC scrape request');
-  
+
   try {
-    const { url } = req.body;
-    
+    const { url, mfcAuth } = req.body;
+
     if (!url) {
       return res.status(400).json({
         success: false,
         message: 'URL is required'
       });
     }
-    
+
     // Validate URL format
     try {
       new URL(url);
@@ -79,7 +79,7 @@ router.post('/scrape/mfc', async (req, res) => {
         message: 'Invalid URL format'
       });
     }
-    
+
     // Check if it's an MFC URL
     if (!url.includes('myfigurecollection.net')) {
       return res.status(400).json({
@@ -87,10 +87,13 @@ router.post('/scrape/mfc', async (req, res) => {
         message: 'URL must be from myfigurecollection.net'
       });
     }
-    
+
     console.log(`[SCRAPER API] Processing MFC URL: ${url}`);
-    
-    const scrapedData = await scrapeMFC(url);
+    if (mfcAuth) {
+      console.log('[SCRAPER API] MFC authentication cookies provided');
+    }
+
+    const scrapedData = await scrapeMFC(url, mfcAuth);
     
     console.log('[SCRAPER API] MFC scraping completed:', scrapedData);
     
@@ -103,7 +106,7 @@ router.post('/scrape/mfc', async (req, res) => {
     console.error('[SCRAPER API] Error:', error);
     res.status(500).json({
       success: false,
-      message: 'Scraping failed',
+      message: error.message || 'Scraping failed',
       error: error.message
     });
   }

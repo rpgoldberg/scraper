@@ -1,5 +1,5 @@
 {
-  "name": "page-scraper",
+  "name": "scraper",
   "version": "2.0.3",
 
   "description": "Generic web page scraping service with browser automation",
@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "dev": "ts-node-dev --respawn --transpile-only -r dotenv/config src/index.ts",
     "test": "jest --config jest.config.js",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",

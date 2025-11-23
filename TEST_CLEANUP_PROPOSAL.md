@@ -1,4 +1,4 @@
-# Test Cleanup Proposal for page-scraper
+# Test Cleanup Proposal for scraper
 
 ## Current State
 - Total: 219 tests
