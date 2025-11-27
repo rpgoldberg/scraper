@@ -1,7 +1,10 @@
 # =============================================================================
-# BASE STAGE - Secure Ubuntu 24.04 + Node 24 + Patched Chrome 142.0.7444.137
+# BASE STAGE - Secure Ubuntu 24.04 + Node 24 + Patched Chrome 142.0.7444.175
 # =============================================================================
 FROM ubuntu:24.04 AS base
+
+# Cache-bust ARG to invalidate Docker layers when dependencies change
+ARG CACHE_BUST=2025-11-27-v2
 
 # Install Node.js 24 using official binaries (avoids NodeSource CVE false positives)
 RUN apt-get update && apt-get install -y \

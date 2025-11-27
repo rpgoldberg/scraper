@@ -122,8 +122,7 @@ jobs:
           push: false
           load: true
           tags: local-scan:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # No cache-from to ensure fresh build with latest package-lock.json
           no-cache: true
 
       - name: Install security tools
