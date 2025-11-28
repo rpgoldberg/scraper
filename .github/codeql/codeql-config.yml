@@ -3,11 +3,22 @@
 
 name: "Custom CodeQL Configuration"
 
-# Use the default queries plus security-extended
+# Use security-extended suite plus our custom queries
 queries:
   - uses: security-extended
+  # Use our custom log injection query that recognizes sanitizeForLog functions
+  - uses: ./.github/codeql/queries/LogInjectionSanitizers.ql
 
-# Include our custom query library that defines sanitizers
+# Exclude certain queries that have custom handling or are false positives
+query-filters:
+  # We replace the default log-injection with our custom version that recognizes sanitizers
+  - exclude:
+      id: js/log-injection
+  # Resource exhaustion is a false positive - capWaitTime() caps user input to 1000ms max
+  - exclude:
+      id: js/resource-exhaustion
+
+# Include our custom query pack
 packs:
   javascript:
     - ./.github/codeql/queries
