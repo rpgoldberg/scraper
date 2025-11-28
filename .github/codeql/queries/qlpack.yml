@@ -1,0 +1,5 @@
+name: scraper-security-customizations
+version: 1.0.0
+dependencies:
+  codeql/javascript-all: "*"
+  codeql/javascript-queries: "*"

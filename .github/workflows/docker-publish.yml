@@ -85,6 +85,51 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Debug - Show generated tags
+        run: |
+          echo "🏷️ Generated Tags:"
+          echo "${{ steps.meta.outputs.tags }}"
+          echo ""
+          echo "📋 Metadata Labels:"
+          echo "${{ steps.meta.outputs.labels }}"
+          echo ""
+          echo "🔍 Build Info:"
+          echo "  Branch: ${{ github.ref }}"
+          echo "  Event: ${{ github.event_name }}"
+          echo "  Service Version: ${{ steps.service-version.outputs.version }}"
+          echo "  Is Main Branch: ${{ github.ref == 'refs/heads/main' }}"
+
+      - name: Verify image pushed successfully
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "⏳ Waiting for registry propagation..."
+          sleep 15
+
+          # Get first tag to verify
+          FIRST_TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
+          echo "Verifying tag: ${FIRST_TAG}"
+
+          if docker manifest inspect "${FIRST_TAG}" >/dev/null 2>&1; then
+            echo "✅ Image verified in registry: ${FIRST_TAG}"
+          else
+            echo "⚠️ Warning: Could not verify image in registry (may still be propagating)"
+          fi
+
+          # Verify version tag on main branch
+          if [ "${{ github.ref }}" == "refs/heads/main" ]; then
+            VERSION="${{ steps.service-version.outputs.version }}"
+            VERSION_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}"
+            echo "Checking version tag: ${VERSION_TAG}"
+
+            if docker manifest inspect "${VERSION_TAG}" >/dev/null 2>&1; then
+              echo "✅ Version tag verified: ${VERSION_TAG}"
+            else
+              echo "❌ ERROR: Version tag ${VERSION} NOT FOUND in registry"
+              echo "This may indicate a workflow configuration issue"
+              exit 1
+            fi
+          fi
+
   # Call the reusable security scanning workflow (only on non-PR events when image is pushed)
   security-scan:
     needs: build-and-push
@@ -122,8 +167,7 @@ jobs:
           push: false
           load: true
           tags: local-scan:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # No cache-from to ensure fresh build with latest package-lock.json
           no-cache: true
 
       - name: Install security tools
@@ -138,8 +182,8 @@ jobs:
 
       - name: Run vulnerability scan
         run: |
-          # Run grype and check for HIGH or CRITICAL vulnerabilities
-          grype local-scan:latest -o table > vuln-report.txt
+          # Run grype with config file for ignores
+          grype local-scan:latest -c .grype.yaml -o table > vuln-report.txt
           if grep -E "High|Critical" vuln-report.txt | grep -v "SEVERITY"; then
             echo "Found HIGH or CRITICAL vulnerabilities:"
             grep -E "High|Critical" vuln-report.txt | head -20

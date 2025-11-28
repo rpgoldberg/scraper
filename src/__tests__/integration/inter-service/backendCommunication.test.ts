@@ -62,8 +62,9 @@ describe('Inter-Service Integration: Backend-Scraper Communication', () => {
         .expect(200);
 
       expect(response.body).toHaveProperty('status', 'healthy');
-      expect(response.body).toHaveProperty('service', 'page-scraper');
-      expect(response.body).toHaveProperty('timestamp');
+      expect(response.body).toHaveProperty('service', 'scraper');
+      expect(response.body).toHaveProperty('version');
+      expect(typeof response.body.version).toBe('string');
     });
 
     it('should return version information', async () => {
@@ -71,7 +72,7 @@ describe('Inter-Service Integration: Backend-Scraper Communication', () => {
         .get('/version')
         .expect(200);
 
-      expect(response.body).toHaveProperty('name', 'page-scraper');
+      expect(response.body).toHaveProperty('name', 'scraper');
       expect(response.body).toHaveProperty('version');
       expect(response.body).toHaveProperty('status', 'ok');
     });

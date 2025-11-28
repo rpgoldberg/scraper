@@ -38,14 +38,13 @@ jobs:
     strategy:
       matrix:
         service:
-          - name: figure-collector-backend
+          - name: fc-backend
             tag: latest
-          - name: figure-collector-frontend
+          - name: fc-frontend
             tag: latest
-          - name: page-scraper
+          - name: scraper
             tag: latest
-          - name: version-manager
-            tag: latest
+          # version-manager removed - repo archived
 
     steps:
       - name: Checkout code

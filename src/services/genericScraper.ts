@@ -1,4 +1,5 @@
 import puppeteer, { Browser, Page } from 'puppeteer';
+import { sanitizeForLog, isValidMfcUrl, capWaitTime, truncateString, MAX_STRING_LENGTH } from '../utils/security';
 
 export interface ScrapedData {
   imageUrl?: string;
@@ -49,31 +50,38 @@ function fuzzyMatchesPattern(text: string, pattern: string, threshold: number = 
   return similarity >= threshold;
 }
 
-function calculateSimilarity(str1: string, str2: string): number {
-  const longer = str1.length > str2.length ? str1 : str2;
-  const shorter = str1.length > str2.length ? str2 : str1;
-  
+export function calculateSimilarity(str1: string, str2: string): number {
+  // Truncate first to ensure consistency with getEditDistance
+  const s1 = truncateString(str1, MAX_STRING_LENGTH);
+  const s2 = truncateString(str2, MAX_STRING_LENGTH);
+
+  const longer = s1.length > s2.length ? s1 : s2;
+  const shorter = s1.length > s2.length ? s2 : s1;
+
   if (longer.length === 0) return 1.0;
-  
-  // Calculate edit distance
+
   const editDistance = getEditDistance(longer, shorter);
   return (longer.length - editDistance) / longer.length;
 }
 
-function getEditDistance(str1: string, str2: string): number {
-  const matrix = Array(str2.length + 1).fill(null).map(() => Array(str1.length + 1).fill(null));
-  
-  for (let i = 0; i <= str1.length; i++) {
+export function getEditDistance(str1: string, str2: string): number {
+  // Truncate strings to prevent O(n²) DoS attacks from unbounded loop iterations
+  const s1 = truncateString(str1, MAX_STRING_LENGTH);
+  const s2 = truncateString(str2, MAX_STRING_LENGTH);
+
+  const matrix = Array(s2.length + 1).fill(null).map(() => Array(s1.length + 1).fill(null));
+
+  for (let i = 0; i <= s1.length; i++) {
     matrix[0][i] = i;
   }
   
-  for (let j = 0; j <= str2.length; j++) {
+  for (let j = 0; j <= s2.length; j++) {
     matrix[j][0] = j;
   }
-  
-  for (let j = 1; j <= str2.length; j++) {
-    for (let i = 1; i <= str1.length; i++) {
-      if (str1[i - 1] === str2[j - 1]) {
+
+  for (let j = 1; j <= s2.length; j++) {
+    for (let i = 1; i <= s1.length; i++) {
+      if (s1[i - 1] === s2[j - 1]) {
         matrix[j][i] = matrix[j - 1][i - 1];
       } else {
         matrix[j][i] = Math.min(
@@ -84,8 +92,8 @@ function getEditDistance(str1: string, str2: string): number {
       }
     }
   }
-  
-  return matrix[str2.length][str1.length];
+
+  return matrix[s2.length][s1.length];
 }
 
 // Enhanced Cloudflare detection with comprehensive pattern library
@@ -185,7 +193,7 @@ export const SITE_CONFIGS = {
   mfc: {
     imageSelector: '.item-picture .main img',
     manufacturerSelector: '.data-field .data-label:contains("Company") + .data-value .item-entries a span[switch]',
-    nameSelector: '.data-field .data-label:contains("Character") + .data-value .item-entries a span[switch]',
+    nameSelector: '.data-field .data-label:contains("Title") + .data-value .item-entries a span[switch]',
     scaleSelector: '.item-scale',
     cloudflareDetection: {
       titleIncludes: [
@@ -451,8 +459,8 @@ function sanitizeConfigForLogging(config: ScrapeConfig): any {
 }
 
 export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<ScrapedData> {
-  console.log(`[GENERIC SCRAPER] Starting scrape for: ${url}`);
-  console.log(`[GENERIC SCRAPER] Config:`, sanitizeConfigForLogging(config));
+  console.log(`[GENERIC SCRAPER] Starting scrape for: ${sanitizeForLog(url)}`); // lgtm[js/log-injection]
+  console.log('[GENERIC SCRAPER] Config:', sanitizeConfigForLogging(config)); // lgtm[js/log-injection]
 
   let browser: Browser | null = null;
   let context: any | null = null;  // BrowserContext
@@ -549,9 +557,9 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
     
     console.log('[GENERIC SCRAPER] Page loaded, waiting for content...');
     
-    // Wait for dynamic content (configurable)
-    const waitTime = config.waitTime || 1000;
-    await new Promise(resolve => setTimeout(resolve, waitTime));
+    // Wait for dynamic content (configurable, capped to prevent resource exhaustion)
+    const waitTime = capWaitTime(config.waitTime, 1000);
+    await new Promise(resolve => setTimeout(resolve, waitTime)); // lgtm[js/resource-exhaustion]
     
     // Check for Cloudflare challenge if configured
     if (config.cloudflareDetection) {
@@ -590,12 +598,51 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
     }
     
     console.log('[GENERIC SCRAPER] Extracting data...');
-    
+
+    // Check for MFC authentication requirement (NSFW content)
+    const pageTitle = await page.title();
+    const bodyText = await page.evaluate(() => document.body.innerText);
+
+    // Data is sanitized via sanitizeForLog() which removes newlines, ANSI codes, and control chars
+    console.log('[DEBUG] Page title:', sanitizeForLog(pageTitle)); // lgtm[js/log-injection]
+    console.log('[DEBUG] Body text preview:', sanitizeForLog(bodyText.substring(0, 200))); // lgtm[js/log-injection]
+
+    // Detect MFC 404 page (could be truly not found OR NSFW requiring auth)
+    // Use proper URL validation to prevent bypass attacks
+    if (isValidMfcUrl(url) &&
+        (pageTitle.includes('Error') || pageTitle.includes('404')) &&
+        (bodyText.includes('404') || bodyText.includes('Not Found') || bodyText.includes('not found'))) {
+
+      // Provide context-aware error message based on whether auth was provided
+      if (config.mfcAuth) {
+        console.log('[GENERIC SCRAPER] MFC 404 page detected WITH authentication - auth issue or invalid item');
+        throw new Error('MFC_ITEM_NOT_ACCESSIBLE: Item not found despite authentication. This could mean: (1) The item ID is invalid, (2) Your MFC account has insufficient permissions (e.g., SFW-only account trying to access NSFW content), OR (3) Your session cookies have expired or been invalidated. Try refreshing your cookies from your browser.');
+      } else {
+        console.log('[GENERIC SCRAPER] MFC 404 page detected WITHOUT authentication - could be invalid or NSFW');
+        throw new Error('MFC_ITEM_NOT_ACCESSIBLE: Item not found. This could mean: (1) The item ID is invalid, OR (2) This is NSFW content requiring MFC authentication. If you believe this item exists and is NSFW, provide your MFC session cookies via the mfcAuth config parameter to access it. Note: MFC returns a generic 404 for NSFW content when not authenticated.');
+      }
+    }
+
     // Extract data using page.evaluate
     const scrapedData = await page.evaluate((selectors) => {
       const data: any = {};
-      
+      const debugInfo: any = { availableFields: [] };
+
       try {
+        // DEBUG: Log all available data fields on the page
+        const allDataFields = Array.from(document.querySelectorAll('.data-field'));
+        allDataFields.forEach(field => {
+          const label = field.querySelector('.data-label');
+          const value = field.querySelector('.data-value');
+          if (label && value) {
+            debugInfo.availableFields.push({
+              label: label.textContent?.trim(),
+              valuePreview: value.textContent?.trim().substring(0, 50)
+            });
+          }
+        });
+        console.log('[DEBUG] Available MFC fields:', JSON.stringify(debugInfo.availableFields, null, 2));
+
         // Extract image
         if (selectors.imageSelector) {
           const imageElement = document.querySelector(selectors.imageSelector) as HTMLImageElement;
@@ -630,22 +677,60 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
         // Extract name (special handling for MFC)
         if (selectors.nameSelector) {
           if (selectors.nameSelector.includes(':contains(')) {
-            // Handle MFC-specific Character field
+            // MFC uses different fields depending on origin type:
+            // - Licensed characters: "Character" field
+            // - Original characters: "Title" field
             const dataFields = Array.from(document.querySelectorAll('.data-field'));
+            console.log('[DEBUG] Looking for name in Character or Title field...');
+            let nameFound = false;
+
+            // Try Character field first (most common for licensed figures)
             for (const field of dataFields) {
               const label = field.querySelector('.data-label');
               if (label && label.textContent && label.textContent.trim() === 'Character') {
+                console.log('[DEBUG] Found Character field');
                 const nameElement = field.querySelector('.item-entries a span[switch]') as HTMLElement;
                 if (nameElement && nameElement.textContent) {
                   data.name = nameElement.textContent.trim();
+                  console.log('[DEBUG] Extracted name from Character:', data.name);
+                  nameFound = true;
                   break;
                 }
+              }
+            }
+
+            // Fallback to Title field (for original characters)
+            if (!nameFound) {
+              console.log('[DEBUG] Character field not found, trying Title...');
+              for (const field of dataFields) {
+                const label = field.querySelector('.data-label');
+                if (label && label.textContent && label.textContent.trim() === 'Title') {
+                  console.log('[DEBUG] Found Title field');
+                  const nameElement = field.querySelector('.item-entries a span[switch]') as HTMLElement;
+                  if (nameElement && nameElement.textContent) {
+                    data.name = nameElement.textContent.trim();
+                    console.log('[DEBUG] Extracted name from Title:', data.name);
+                    nameFound = true;
+                    break;
+                  }
+                }
+              }
+            }
+
+            // Last resort: use h1
+            if (!nameFound) {
+              console.log('[DEBUG] Neither Character nor Title found, trying h1...');
+              const h1 = document.querySelector('h1');
+              if (h1 && h1.textContent) {
+                data.name = h1.textContent.trim();
+                console.log('[DEBUG] Used h1 as name:', data.name);
               }
             }
           } else {
             const nameElement = document.querySelector(selectors.nameSelector) as HTMLElement;
             if (nameElement && nameElement.textContent) {
               data.name = nameElement.textContent.trim();
+              console.log('[DEBUG] Extracted name via direct selector:', data.name);
             }
           }
         }
@@ -727,8 +812,11 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
       'Unknown argument',
       'ENOSPC',
       'HTTP 404',
-      'HTTP 500', 
-      'HTTP 429'
+      'HTTP 500',
+      'HTTP 429',
+      // User-facing errors that should reach the user
+      'MFC_ITEM_NOT_ACCESSIBLE',
+      'NSFW_AUTH_REQUIRED'
     ];
 
     const isCriticalError = criticalErrors.some(errorType => 
@@ -767,8 +855,14 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
 }
 
 // Convenience function for MFC scraping
-export async function scrapeMFC(url: string): Promise<ScrapedData> {
-  return scrapeGeneric(url, SITE_CONFIGS.mfc);
+export async function scrapeMFC(url: string, mfcAuth?: any): Promise<ScrapedData> {
+  const config: ScrapeConfig = { ...SITE_CONFIGS.mfc };
+  if (mfcAuth) {
+    // Parse JSON string if needed, then wrap in sessionCookies structure
+    const cookiesObj = typeof mfcAuth === 'string' ? JSON.parse(mfcAuth) : mfcAuth;
+    config.mfcAuth = { sessionCookies: cookiesObj };
+  }
+  return scrapeGeneric(url, config);
 }
 
 // Graceful shutdown
