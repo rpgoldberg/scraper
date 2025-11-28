@@ -459,8 +459,8 @@ function sanitizeConfigForLogging(config: ScrapeConfig): any {
 }
 
 export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<ScrapedData> {
-  console.log(`[GENERIC SCRAPER] Starting scrape for: ${sanitizeForLog(url)}`);
-  console.log('[GENERIC SCRAPER] Config:', sanitizeConfigForLogging(config));
+  console.log(`[GENERIC SCRAPER] Starting scrape for: ${sanitizeForLog(url)}`); // lgtm[js/log-injection]
+  console.log('[GENERIC SCRAPER] Config:', sanitizeConfigForLogging(config)); // lgtm[js/log-injection]
 
   let browser: Browser | null = null;
   let context: any | null = null;  // BrowserContext
@@ -559,7 +559,7 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
     
     // Wait for dynamic content (configurable, capped to prevent resource exhaustion)
     const waitTime = capWaitTime(config.waitTime, 1000);
-    await new Promise(resolve => setTimeout(resolve, waitTime));
+    await new Promise(resolve => setTimeout(resolve, waitTime)); // lgtm[js/resource-exhaustion]
     
     // Check for Cloudflare challenge if configured
     if (config.cloudflareDetection) {
@@ -604,10 +604,8 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
     const bodyText = await page.evaluate(() => document.body.innerText);
 
     // Data is sanitized via sanitizeForLog() which removes newlines, ANSI codes, and control chars
-    // lgtm[js/log-injection]
-    console.log('[DEBUG] Page title:', sanitizeForLog(pageTitle));
-    // lgtm[js/log-injection]
-    console.log('[DEBUG] Body text preview:', sanitizeForLog(bodyText.substring(0, 200)));
+    console.log('[DEBUG] Page title:', sanitizeForLog(pageTitle)); // lgtm[js/log-injection]
+    console.log('[DEBUG] Body text preview:', sanitizeForLog(bodyText.substring(0, 200))); // lgtm[js/log-injection]
 
     // Detect MFC 404 page (could be truly not found OR NSFW requiring auth)
     // Use proper URL validation to prevent bypass attacks
