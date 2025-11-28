@@ -1,4 +1,5 @@
 import puppeteer, { Browser, Page } from 'puppeteer';
+import { sanitizeForLog, isValidMfcUrl, capWaitTime, truncateString, MAX_STRING_LENGTH } from '../utils/security';
 
 export interface ScrapedData {
   imageUrl?: string;
@@ -61,19 +62,23 @@ function calculateSimilarity(str1: string, str2: string): number {
 }
 
 function getEditDistance(str1: string, str2: string): number {
-  const matrix = Array(str2.length + 1).fill(null).map(() => Array(str1.length + 1).fill(null));
-  
-  for (let i = 0; i <= str1.length; i++) {
+  // Truncate strings to prevent O(n²) DoS attacks from unbounded loop iterations
+  const s1 = truncateString(str1, MAX_STRING_LENGTH);
+  const s2 = truncateString(str2, MAX_STRING_LENGTH);
+
+  const matrix = Array(s2.length + 1).fill(null).map(() => Array(s1.length + 1).fill(null));
+
+  for (let i = 0; i <= s1.length; i++) {
     matrix[0][i] = i;
   }
   
-  for (let j = 0; j <= str2.length; j++) {
+  for (let j = 0; j <= s2.length; j++) {
     matrix[j][0] = j;
   }
-  
-  for (let j = 1; j <= str2.length; j++) {
-    for (let i = 1; i <= str1.length; i++) {
-      if (str1[i - 1] === str2[j - 1]) {
+
+  for (let j = 1; j <= s2.length; j++) {
+    for (let i = 1; i <= s1.length; i++) {
+      if (s1[i - 1] === s2[j - 1]) {
         matrix[j][i] = matrix[j - 1][i - 1];
       } else {
         matrix[j][i] = Math.min(
@@ -84,8 +89,8 @@ function getEditDistance(str1: string, str2: string): number {
       }
     }
   }
-  
-  return matrix[str2.length][str1.length];
+
+  return matrix[s2.length][s1.length];
 }
 
 // Enhanced Cloudflare detection with comprehensive pattern library
@@ -451,8 +456,8 @@ function sanitizeConfigForLogging(config: ScrapeConfig): any {
 }
 
 export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<ScrapedData> {
-  console.log(`[GENERIC SCRAPER] Starting scrape for: ${url}`);
-  console.log(`[GENERIC SCRAPER] Config:`, sanitizeConfigForLogging(config));
+  console.log(`[GENERIC SCRAPER] Starting scrape for: ${sanitizeForLog(url)}`);
+  console.log('[GENERIC SCRAPER] Config:', sanitizeConfigForLogging(config));
 
   let browser: Browser | null = null;
   let context: any | null = null;  // BrowserContext
@@ -549,8 +554,8 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
     
     console.log('[GENERIC SCRAPER] Page loaded, waiting for content...');
     
-    // Wait for dynamic content (configurable)
-    const waitTime = config.waitTime || 1000;
+    // Wait for dynamic content (configurable, capped to prevent resource exhaustion)
+    const waitTime = capWaitTime(config.waitTime, 1000);
     await new Promise(resolve => setTimeout(resolve, waitTime));
     
     // Check for Cloudflare challenge if configured
@@ -599,7 +604,8 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
     console.log('[DEBUG] Body text preview:', bodyText.substring(0, 200));
 
     // Detect MFC 404 page (could be truly not found OR NSFW requiring auth)
-    if (url.includes('myfigurecollection.net') &&
+    // Use proper URL validation to prevent bypass attacks
+    if (isValidMfcUrl(url) &&
         (pageTitle.includes('Error') || pageTitle.includes('404')) &&
         (bodyText.includes('404') || bodyText.includes('Not Found') || bodyText.includes('not found'))) {
 
