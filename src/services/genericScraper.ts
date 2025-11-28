@@ -50,7 +50,7 @@ function fuzzyMatchesPattern(text: string, pattern: string, threshold: number = 
   return similarity >= threshold;
 }
 
-function calculateSimilarity(str1: string, str2: string): number {
+export function calculateSimilarity(str1: string, str2: string): number {
   const longer = str1.length > str2.length ? str1 : str2;
   const shorter = str1.length > str2.length ? str2 : str1;
   
@@ -61,7 +61,7 @@ function calculateSimilarity(str1: string, str2: string): number {
   return (longer.length - editDistance) / longer.length;
 }
 
-function getEditDistance(str1: string, str2: string): number {
+export function getEditDistance(str1: string, str2: string): number {
   // Truncate strings to prevent O(n²) DoS attacks from unbounded loop iterations
   const s1 = truncateString(str1, MAX_STRING_LENGTH);
   const s2 = truncateString(str2, MAX_STRING_LENGTH);
