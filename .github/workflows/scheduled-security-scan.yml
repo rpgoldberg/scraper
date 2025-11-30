@@ -187,8 +187,7 @@ jobs:
               issue.title.includes(serviceName) && issue.title.includes('Security:')
             );
 
-            const body = `
-${report}
+            const body = report + `
 
 ---
 **Scan Date**: ${new Date().toISOString()}
