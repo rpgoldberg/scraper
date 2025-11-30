@@ -10,12 +10,9 @@ export interface ScrapedData {
 }
 
 export interface MFCAuthConfig {
-  sessionCookies: {
-    PHPSESSID: string;
-    sesUID: string;
-    TBv4_Iden: string;
-    TBv4_Hash: string;
-  };
+  // Dynamic cookie structure - accepts any cookies the user provides
+  // This allows adapting to MFC cookie name changes without code updates
+  sessionCookies: Record<string, string>;
 }
 
 export interface ScrapeConfig {
@@ -443,16 +440,13 @@ export async function initializeBrowserPool(): Promise<void> {
 function sanitizeConfigForLogging(config: ScrapeConfig): any {
   const sanitized: any = { ...config };
 
-  // Redact MFC authentication cookies
+  // Redact MFC authentication cookies (dynamic - redacts all cookie names)
   if (sanitized.mfcAuth?.sessionCookies) {
-    sanitized.mfcAuth = {
-      sessionCookies: {
-        PHPSESSID: '[REDACTED]',
-        sesUID: '[REDACTED]',
-        TBv4_Iden: '[REDACTED]',
-        TBv4_Hash: '[REDACTED]'
-      }
-    };
+    const redactedCookies: Record<string, string> = {};
+    for (const cookieName of Object.keys(sanitized.mfcAuth.sessionCookies)) {
+      redactedCookies[cookieName] = '[REDACTED]';
+    }
+    sanitized.mfcAuth = { sessionCookies: redactedCookies };
   }
 
   return sanitized;
@@ -514,35 +508,33 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
       });
 
       const cookies = config.mfcAuth.sessionCookies;
-      await page.setCookie(
-        {
-          name: 'PHPSESSID',
-          value: cookies.PHPSESSID,
-          domain: '.myfigurecollection.net',
-          path: '/',
-          httpOnly: true,
-          secure: true,
-          sameSite: 'Lax'
-        },
-        {
-          name: 'sesUID',
-          value: cookies.sesUID,
-          domain: '.myfigurecollection.net',
-          path: '/',
-        },
-        {
-          name: 'TBv4_Iden',
-          value: cookies.TBv4_Iden,
-          domain: '.myfigurecollection.net',
-          path: '/',
-        },
-        {
-          name: 'TBv4_Hash',
-          value: cookies.TBv4_Hash,
-          domain: '.myfigurecollection.net',
-          path: '/',
-        }
-      );
+
+      // Build cookie array dynamically from whatever cookies the user provides
+      // Filter out undefined/empty values to prevent Puppeteer errors
+      const cookieArray = Object.entries(cookies)
+        .filter(([_, value]) => value != null && value !== '')
+        .map(([name, value]) => {
+          const cookieObj: any = {
+            name,
+            value,
+            domain: '.myfigurecollection.net',
+            path: '/'
+          };
+          // PHPSESSID needs special security flags
+          if (name === 'PHPSESSID') {
+            cookieObj.httpOnly = true;
+            cookieObj.secure = true;
+            cookieObj.sameSite = 'Lax';
+          }
+          return cookieObj;
+        });
+
+      if (cookieArray.length === 0) {
+        console.log('[GENERIC SCRAPER] Warning: No valid cookies provided in mfcAuth');
+      } else {
+        console.log(`[GENERIC SCRAPER] Setting ${cookieArray.length} cookies: ${cookieArray.map(c => c.name).join(', ')}`);
+        await page.setCookie(...cookieArray);
+      }
 
       console.log('[GENERIC SCRAPER] MFC authentication applied successfully');
     }
