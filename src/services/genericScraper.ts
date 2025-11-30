@@ -433,12 +433,12 @@ export async function initializeBrowserPool(): Promise<void> {
   await BrowserPool.initialize();
 }
 
-// Allowlist of known MFC cookie names for security validation
-// Can be extended via MFC_ALLOWED_COOKIES env var (comma-separated)
-const DEFAULT_COOKIE_NAMES = ['PHPSESSID', 'sesUID', 'sesDID', 'cf_clearance', 'TBv4_Iden', 'TBv4_Hash'];
+// Allowlist of MFC cookie names for security validation
+// MUST be set via MFC_ALLOWED_COOKIES env var (comma-separated)
+// Example: MFC_ALLOWED_COOKIES=PHPSESSID,sesUID,sesDID,cf_clearance
 const ALLOWED_COOKIE_NAMES = process.env.MFC_ALLOWED_COOKIES
-  ? process.env.MFC_ALLOWED_COOKIES.split(',').map(s => s.trim())
-  : DEFAULT_COOKIE_NAMES;
+  ? process.env.MFC_ALLOWED_COOKIES.split(',').map(s => s.trim()).filter(s => s.length > 0)
+  : [];
 
 /**
  * Sanitize sensitive data from config before logging
