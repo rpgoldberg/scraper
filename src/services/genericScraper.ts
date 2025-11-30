@@ -444,7 +444,9 @@ function sanitizeConfigForLogging(config: ScrapeConfig): any {
   if (sanitized.mfcAuth?.sessionCookies) {
     const redactedCookies: Record<string, string> = {};
     for (const cookieName of Object.keys(sanitized.mfcAuth.sessionCookies)) {
-      redactedCookies[cookieName] = '[REDACTED]';
+      // Sanitize cookie name to prevent property injection (CodeQL security)
+      const safeName = sanitizeForLog(cookieName);
+      redactedCookies[safeName] = '[REDACTED]';
     }
     sanitized.mfcAuth = { sessionCookies: redactedCookies };
   }
