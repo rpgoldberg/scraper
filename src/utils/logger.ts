@@ -10,6 +10,9 @@
  * - SERVICE_AUTH_TOKEN_DEBUG=true (show partial token for debugging, NEVER full token)
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
+
 export interface Logger {
   debug: (namespace: string, message: string, data?: any) => void;
   info: (message: string, data?: any) => void;
@@ -147,4 +150,126 @@ export const scraperDebug = {
   registration: (message: string, data?: any) => logger.debug('scraper:registration', message, data),
   api: (message: string, data?: any) => logger.debug('scraper:api', message, data),
   pool: (message: string, data?: any) => logger.debug('scraper:pool', message, data),
+  enrichment: (message: string, data?: any) => logger.debug('scraper:enrichment', message, data),
+};
+
+/**
+ * Enrichment tracking logger for sync analysis.
+ * These logs are always written (not debug-gated) for later analysis.
+ * Use structured JSON format for easy parsing.
+ *
+ * Logs are written to:
+ * - Console (stdout) for real-time viewing
+ * - File (logs/enrichment.log) for later analysis
+ *
+ * View logs: cat logs/enrichment.log | grep "FAILURE"
+ */
+export interface EnrichmentEvent {
+  event: 'start' | 'success' | 'failure' | 'retry' | 'skip' | 'rate_limited';
+  mfcId: string;
+  sessionId?: string;
+  status?: 'owned' | 'ordered' | 'wished';
+  errorType?: string;
+  httpStatus?: number;
+  retryCount?: number;
+  maxRetries?: number;
+  durationMs?: number;
+  reason?: string;
+  // Field completeness tracking for partial re-enrichment analysis
+  fields?: {
+    imageUrl?: boolean;
+    name?: boolean;
+    manufacturer?: boolean;
+    origin?: boolean;
+    releaseDate?: boolean;
+    price?: boolean;
+  };
+}
+
+// Ensure logs directory exists
+const logsDir = path.join(process.cwd(), 'logs');
+if (!fs.existsSync(logsDir)) {
+  fs.mkdirSync(logsDir, { recursive: true });
+}
+const enrichmentLogPath = path.join(logsDir, 'enrichment.log');
+
+export const enrichmentLogger = {
+  /**
+   * Log an enrichment event in structured format for later analysis
+   * Writes to both console AND file for persistence
+   */
+  log(event: EnrichmentEvent): void {
+    const timestamp = new Date().toISOString();
+    const entry = {
+      timestamp,
+      component: 'ENRICHMENT',
+      ...event,
+    };
+    const logLine = `[${timestamp}] [ENRICHMENT] ${event.event.toUpperCase()} mfcId=${event.mfcId} ${JSON.stringify(entry)}`;
+
+    // Console output
+    console.log(logLine);
+
+    // File output (append)
+    fs.appendFileSync(enrichmentLogPath, logLine + '\n');
+  },
+
+  /**
+   * Log successful enrichment with field completeness for analysis
+   */
+  success(mfcId: string, sessionId?: string, durationMs?: number, fields?: {
+    imageUrl?: boolean;
+    name?: boolean;
+    manufacturer?: boolean;
+    origin?: boolean;
+    releaseDate?: boolean;
+    price?: boolean;
+  }): void {
+    this.log({ event: 'success', mfcId, sessionId, durationMs, fields });
+  },
+
+  /**
+   * Log failed enrichment with error details
+   */
+  failure(mfcId: string, errorType: string, reason: string, opts?: {
+    sessionId?: string;
+    httpStatus?: number;
+    retryCount?: number;
+    maxRetries?: number;
+    durationMs?: number;
+  }): void {
+    this.log({
+      event: 'failure',
+      mfcId,
+      errorType,
+      reason,
+      ...opts,
+    });
+  },
+
+  /**
+   * Log rate limit event (MFC busy)
+   */
+  rateLimited(mfcId: string, sessionId?: string, isCloudflare?: boolean): void {
+    this.log({
+      event: 'rate_limited',
+      mfcId,
+      sessionId,
+      reason: isCloudflare ? 'Cloudflare block' : 'MFC rate limit (429/503)',
+    });
+  },
+
+  /**
+   * Log retry attempt
+   */
+  retry(mfcId: string, retryCount: number, maxRetries: number, sessionId?: string): void {
+    this.log({ event: 'retry', mfcId, retryCount, maxRetries, sessionId });
+  },
+
+  /**
+   * Log skipped item (already exists, duplicate, etc.)
+   */
+  skip(mfcId: string, reason: string, sessionId?: string): void {
+    this.log({ event: 'skip', mfcId, reason, sessionId });
+  },
 };
