@@ -1,20 +1,25 @@
 # =============================================================================
-# BASE STAGE - Secure Ubuntu 24.04 + Node 24 + Patched Chrome 143.0.7499.41
+# BASE STAGE - Secure Ubuntu 24.04 + Node 24.13.1 LTS + Chrome 145.0.7632.46
 # =============================================================================
 FROM ubuntu:24.04 AS base
 
 # Cache-bust ARG to invalidate Docker layers when dependencies change
-ARG CACHE_BUST=2025-12-05-chrome-143
+ARG CACHE_BUST=2026-02-12-npm-11.10-openssl-gnupg-patches
 
+# Update all packages for latest security patches (openssl, gnupg, glibc)
 # Install Node.js 24 using official binaries (avoids NodeSource CVE false positives)
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get upgrade -y \
+    && apt-get install -y \
     curl \
     xz-utils \
-    && NODE_VERSION=v24.8.0 \
+    && NODE_VERSION=v24.13.1 \
     && curl -fsSLO https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-x64.tar.xz \
     && tar -xJf node-${NODE_VERSION}-linux-x64.tar.xz -C /usr/local --strip-components=1 \
     && rm node-${NODE_VERSION}-linux-x64.tar.xz \
     && rm -rf /var/lib/apt/lists/*
+
+# Upgrade npm to latest to fix bundled dependency vulnerabilities (tar, brace-expansion)
+RUN npm install -g npm@latest && npm cache clean --force
 
 WORKDIR /app
 
@@ -58,9 +63,9 @@ RUN apt-get update && apt-get upgrade -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# Download and install patched Chrome for Testing (143.0.7499.41) - fixes CVE-2025-13223/13224/13042 and earlier CVEs
+# Download and install Chrome for Testing (145.0.7632.46) - latest stable, fixes all known CVEs
 RUN apt-get update && apt-get install -y wget unzip \
-    && wget -q https://storage.googleapis.com/chrome-for-testing-public/143.0.7499.41/linux64/chrome-linux64.zip \
+    && wget -q https://storage.googleapis.com/chrome-for-testing-public/145.0.7632.46/linux64/chrome-linux64.zip \
     && unzip chrome-linux64.zip \
     && mv chrome-linux64 /opt/chrome \
     && rm chrome-linux64.zip \
@@ -94,7 +99,7 @@ RUN rm -rf /root/.cache/puppeteer \
 COPY . .
 
 # Expose port for development
-EXPOSE 3000
+EXPOSE 3080
 
 CMD ["npm", "run", "dev"]
 
@@ -160,10 +165,10 @@ RUN groupadd -r pptruser && useradd -r -g pptruser -G audio,video pptruser \
 USER pptruser
 
 # Expose port
-EXPOSE 3000
+EXPOSE 3050
 
 # Health check with 30s start period for Puppeteer initialization
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD node -e "require('http').get('http://localhost:3000/health', (res) => process.exit(res.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
+    CMD node -e "require('http').get('http://localhost:3050/health', (res) => process.exit(res.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
 
 CMD ["npm", "start"]

@@ -201,6 +201,77 @@ x-admin-token: <admin-token-value>
 - Reset pool after detecting browser fingerprinting changes
 - Emergency recovery from browser cache/session issues in test environments
 
+### Session Management Endpoints
+
+#### GET /sync/sessions
+Get all active sessions with their status.
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "sessions": [
+      {
+        "sessionId": "abc12345...",
+        "isPaused": true,
+        "consecutiveFailures": 3,
+        "failedMfcIds": ["123456", "789012"],
+        "inCooldown": false,
+        "cooldownRemainingMs": 0
+      }
+    ],
+    "count": 1,
+    "pausedCount": 1,
+    "inCooldownCount": 0
+  }
+}
+```
+
+#### POST /sync/sessions/:sessionId/resume
+Resume a paused session to continue processing.
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Session resumed, processing will continue"
+}
+```
+
+#### POST /sync/sessions/:sessionId/cancel-failed
+Cancel all failed items for a session (removes them from queue).
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Cancelled 3 failed items",
+  "data": { "cancelledCount": 3 }
+}
+```
+
+### GET /sync/queue-stats
+Get detailed queue statistics for monitoring.
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "queues": { "hot": 10, "warm": 5, "cold": 100 },
+    "total": 115,
+    "processing": 1,
+    "completed": 50,
+    "failed": 2,
+    "rateLimit": {
+      "active": false,
+      "currentDelayMs": 3000
+    }
+  }
+}
+```
+
 ## 🧪 Testing
 
 The scraper includes comprehensive test coverage with enhanced testing infrastructure and containerized test execution.
@@ -408,7 +479,16 @@ module.exports = {
 
 ### Recent Improvements
 
-**Security Enhancements (Latest):**
+**MFC Bulk Import Enhancements (Latest):**
+- **Cookie Passthrough for All Items**: Cookies are now passed for ALL items during bulk sync, not just NSFW content
+  - Required for accessing user-specific data (collection status, prices, ownership info)
+  - Ensures consistent authentication across the entire sync operation
+- **Development Server (tsx)**: Switched from `ts-node-dev` to `tsx` for faster startup
+  - Uses esbuild for near-instant TypeScript compilation
+  - Automatic `.env` file loading via `--env-file` flag
+  - Hot reload with `tsx watch` for seamless development
+
+**Security Enhancements:**
 - Protected `/reset-pool` endpoint with authentication (x-admin-token)
 - Conditional endpoint registration (not available in production)
 - Async browser cleanup in `BrowserPool.reset()`
@@ -532,7 +612,7 @@ See `.env.example` for all configuration options including:
 # Install dependencies
 npm install
 
-# Start development server
+# Start development server (uses tsx for fast startup)
 npm run dev
 
 # Build for production
@@ -573,17 +653,17 @@ npx jest performance.test.ts
 The service uses a multi-stage Dockerfile with the following build targets:
 
 ```bash
-# Development (with hot reload, port 3010)
+# Development (with hot reload, port 3080)
 docker build --target development -t scraper:dev .
-docker run -p 3010:3010 -e PORT=3010 --shm-size=2gb scraper:dev
+docker run -p 3080:3080 -e PORT=3080 --shm-size=2gb scraper:dev
 
-# Test environment (port 3005)
+# Test environment (port 3070)
 docker build --target test -t scraper:test .
-docker run -p 3005:3005 -e PORT=3005 --shm-size=2gb scraper:test
+docker run -p 3070:3070 -e PORT=3070 --shm-size=2gb scraper:test
 
-# Production (default, port 3000)
+# Production (default, port 3050)
 docker build -t scraper:prod .
-docker run -p 3000:3000 -e PORT=3000 --shm-size=2gb scraper:prod
+docker run -p 3050:3050 -e PORT=3050 --shm-size=2gb scraper:prod
 ```
 
 **Available stages:**
@@ -600,7 +680,7 @@ docker run -p 3000:3000 -e PORT=3000 --shm-size=2gb scraper:prod
 See `.env.example` for complete configuration template.
 
 **Required:**
-- `PORT`: Server port (default: 3000, dev: 3010, test: 3005)
+- `PORT`: Server port (prod: 3050, local dev: 3080, test: 3070, Coolify dev: 3090)
 - `NODE_ENV`: Environment mode (development, test, production)
 
 **Optional:**

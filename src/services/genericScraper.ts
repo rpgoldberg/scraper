@@ -1,12 +1,31 @@
 import puppeteer, { Browser, Page } from 'puppeteer';
 import { sanitizeForLog, isValidMfcUrl, capWaitTime, truncateString, MAX_STRING_LENGTH } from '../utils/security';
+import { ICompanyEntry, IArtistEntry, IMfcFieldData, extractCompanies, extractArtists, extractMfcFields } from './companyArtistExtractor';
+import { IRelease, extractReleases } from './releaseExtractor';
+
+// Re-export IRelease for backward compatibility
+export type { IRelease } from './releaseExtractor';
 
 export interface ScrapedData {
   imageUrl?: string;
-  manufacturer?: string;
+  manufacturer?: string;  // Legacy: kept for backward compatibility
   name?: string;
   scale?: string;
-  [key: string]: any; // Allow additional fields
+  releases?: IRelease[];
+  // Schema v3: Company and Artist data with roles
+  companies?: ICompanyEntry[];  // Companies with role (Manufacturer, Distributor, etc.)
+  artists?: IArtistEntry[];      // Artists with role (Sculptor, Illustrator, etc.)
+  // Schema v3: Individual MFC fields
+  mfcTitle?: string;        // The figure's specific title/name
+  origin?: string;          // Series/franchise (e.g., "Original", "Fate/Grand Order")
+  version?: string;         // Variant info (e.g., "Little Devil Ver.")
+  category?: string;        // e.g., "Scale Figure"
+  classification?: string;  // e.g., "Goods"
+  materials?: string;       // e.g., "PVC, ABS"
+  dimensions?: string;      // e.g., "1/6, H=260mm"
+  jan?: string;             // JAN/UPC barcode
+  tags?: string[];          // Various tags (e.g., "18+", "Castoff", "Limited")
+  [key: string]: any;       // Allow additional fields
 }
 
 export interface MFCAuthConfig {
@@ -232,6 +251,17 @@ export class BrowserPool {
     this.isInitialized = false;
   }
   
+
+  /** Number of browsers currently available in the pool */
+  static getPoolSize(): number {
+    return this.browsers.length;
+  }
+
+  /** Maximum pool capacity */
+  static getPoolCapacity(): number {
+    return this.POOL_SIZE;
+  }
+
   private static getBrowserConfig() {
     const config: any = {
       headless: true,
@@ -330,16 +360,48 @@ export class BrowserPool {
   }
 
   // Return a browser back to the pool after use
-  static returnBrowser(browser: Browser): void {
+  static async returnBrowser(browser: Browser): Promise<void> {
+    // Check if browser is still connected before returning to pool
+    try {
+      const isConnected = browser.isConnected();
+      if (!isConnected) {
+        console.warn('[BROWSER POOL] Attempted to return disconnected browser - creating replacement');
+        // Don't return the dead browser, create a new one instead
+        await this.replenishPool();
+        return;
+      }
+    } catch (checkError) {
+      console.error('[BROWSER POOL] Error checking browser connection:', checkError);
+      // Browser is in unknown state, don't return it
+      await this.replenishPool();
+      return;
+    }
+
     // Only return if pool isn't already full
     if (this.browsers.length < this.POOL_SIZE) {
       this.browsers.push(browser);
       console.log(`[BROWSER POOL] Browser returned to pool (${this.browsers.length} available)`);
     } else {
-      /* istanbul ignore next - Pool overflow scenario rarely occurs */
       console.log('[BROWSER POOL] Pool full, browser will be closed');
-      /* istanbul ignore next */
       browser.close().catch((err: any) => console.error('[BROWSER POOL] Error closing extra browser:', err));
+    }
+  }
+
+
+  /**
+   * Replenish the browser pool when a browser dies.
+   * Creates a new browser if pool is below capacity.
+   */
+  private static async replenishPool(): Promise<void> {
+    if (this.browsers.length < this.POOL_SIZE) {
+      try {
+        console.log(`[BROWSER POOL] Replenishing pool (${this.browsers.length}/${this.POOL_SIZE})...`);
+        const browser = await puppeteer.launch(this.getBrowserConfig());
+        this.browsers.push(browser);
+        console.log(`[BROWSER POOL] New browser added (${this.browsers.length}/${this.POOL_SIZE})`);
+      } catch (error) {
+        console.error('[BROWSER POOL] Failed to replenish pool:', error);
+      }
     }
   }
 
@@ -426,6 +488,53 @@ export class BrowserPool {
     this.isInitialized = false;
     console.log('[BROWSER POOL] All browsers close attempts completed');
   }
+
+
+  /**
+   * Get health status of the browser pool for monitoring/debugging.
+   * Returns stats about available browsers and potential resource issues.
+   */
+  static async getHealth(): Promise<{
+    initialized: boolean;
+    poolSize: number;
+    availableBrowsers: number;
+    connectedBrowsers: number;
+    hasStealthBrowser: boolean;
+    warnings: string[];
+  }> {
+    const warnings: string[] = [];
+    let connectedCount = 0;
+
+    // Check each browser's connection status
+    for (const browser of this.browsers) {
+      try {
+        if (browser.isConnected()) {
+          connectedCount++;
+        }
+      } catch {
+        warnings.push('Failed to check browser connection status');
+      }
+    }
+
+    // Warn if pool is exhausted
+    if (this.isInitialized && this.browsers.length === 0) {
+      warnings.push('CRITICAL: Browser pool exhausted - all browsers in use');
+    }
+
+    // Warn if some browsers are disconnected
+    if (connectedCount < this.browsers.length) {
+      warnings.push(`${this.browsers.length - connectedCount} browser(s) disconnected but not removed from pool`);
+    }
+
+    return {
+      initialized: this.isInitialized,
+      poolSize: this.POOL_SIZE,
+      availableBrowsers: this.browsers.length,
+      connectedBrowsers: connectedCount,
+      hasStealthBrowser: this.stealthBrowser !== null,
+      warnings,
+    };
+  }
 }
 
 // Initialize the browser pool
@@ -466,6 +575,9 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
   console.log(`[GENERIC SCRAPER] Starting scrape for: ${sanitizeForLog(url)}`); // lgtm[js/log-injection]
   console.log('[GENERIC SCRAPER] Config:', sanitizeConfigForLogging(config)); // lgtm[js/log-injection]
 
+  const t0 = Date.now();
+  let tBrowser = 0, tContext = 0, tCookies = 0, tNavigate = 0, tExtract = 0;
+
   let browser: Browser | null = null;
   let context: any | null = null;  // BrowserContext
   let page: Page | null = null;
@@ -484,9 +596,12 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
       isPooledBrowser = true; // Regular browsers come from pool and should be returned
     }
 
+    tBrowser = Date.now() - t0;
+
     // Use browser context for isolation (browser stays alive for pool reuse)
     context = await browser.createBrowserContext();
     page = await context.newPage();
+    tContext = Date.now() - t0;
 
     if (!page) {
       throw new Error('[GENERIC SCRAPER] Failed to create page');
@@ -511,12 +626,8 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
     if (config.mfcAuth?.sessionCookies) {
       console.log('[GENERIC SCRAPER] Applying MFC authentication for NSFW access');
 
-      // Visit MFC homepage first to establish domain context for cookies
-      await page.goto('https://myfigurecollection.net/', {
-        waitUntil: 'domcontentloaded',
-        timeout: 20000
-      });
-
+      // Set cookies directly — domain is specified explicitly so no homepage visit needed.
+      // This halves the HTTP request footprint to Cloudflare.
       const cookies = config.mfcAuth.sessionCookies;
 
       // Build cookie array dynamically from whatever cookies the user provides
@@ -556,6 +667,7 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
       }
 
       console.log('[GENERIC SCRAPER] MFC authentication applied successfully');
+      tCookies = Date.now() - t0;
     }
 
     console.log('[GENERIC SCRAPER] Navigating to page...');
@@ -566,6 +678,7 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
       timeout: 20000
     });
     
+    tNavigate = Date.now() - t0;
     console.log('[GENERIC SCRAPER] Page loaded, waiting for content...');
     
     // Wait for dynamic content (configurable, capped to prevent resource exhaustion)
@@ -658,7 +771,8 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
         if (selectors.imageSelector) {
           const imageElement = document.querySelector(selectors.imageSelector) as HTMLImageElement;
           if (imageElement && imageElement.src) {
-            data.imageUrl = imageElement.src;
+            // Upgrade to full-resolution: /upload/items/0/ or /1/ → /upload/items/2/
+            data.imageUrl = imageElement.src.replace(/\/upload\/items\/[01]\//, '/upload/items/2/');
           }
         }
         
@@ -774,8 +888,66 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
       return data;
     }, config);
     
+    tExtract = Date.now() - t0;
+    // Extract MFC ID from URL for compact logging
+    const mfcIdMatch = url.match(/\/item\/(\d+)/);
+    const mfcIdTag = mfcIdMatch ? mfcIdMatch[1] : '?';
+    console.log(`[SCRAPE TIMING] MFC ${JSON.stringify(mfcIdTag)}: browser=${tBrowser}ms, ctx=${tContext - tBrowser}ms, cookies=${tCookies ? tCookies - tContext + 'ms' : 'n/a'}, navigate=${tNavigate - (tCookies || tContext)}ms, extract=${tExtract - tNavigate}ms, total=${tExtract}ms`);
     console.log('[GENERIC SCRAPER] Extraction completed:', scrapedData);
-    
+
+    // Schema v3: Extract companies and artists with roles from HTML
+    // This runs in Node.js context using cheerio, not in browser
+    try {
+      const pageHtml = await page.content();
+      const companies = extractCompanies(pageHtml);
+      const artists = extractArtists(pageHtml);
+
+      if (companies.length > 0) {
+        scrapedData.companies = companies;
+        console.log('[GENERIC SCRAPER] Extracted companies:', companies);
+
+        // Set legacy manufacturer from first Manufacturer role for backward compatibility
+        if (!scrapedData.manufacturer) {
+          const manufacturer = companies.find(c => c.role === 'Manufacturer');
+          if (manufacturer) {
+            scrapedData.manufacturer = manufacturer.name;
+          }
+        }
+      }
+
+      if (artists.length > 0) {
+        scrapedData.artists = artists;
+        console.log('[GENERIC SCRAPER] Extracted artists:', artists);
+      }
+
+      // Extract releases with JAN barcodes
+      const releases = extractReleases(pageHtml);
+      if (releases.length > 0) {
+        scrapedData.releases = releases;
+        console.log('[GENERIC SCRAPER] Extracted releases:', releases);
+      }
+
+      // Extract individual MFC fields (title, origin, version, etc.)
+      const mfcFields = extractMfcFields(pageHtml);
+      if (mfcFields.title) scrapedData.mfcTitle = mfcFields.title;
+      if (mfcFields.origin) scrapedData.origin = mfcFields.origin;
+      if (mfcFields.version) scrapedData.version = mfcFields.version;
+      if (mfcFields.category) scrapedData.category = mfcFields.category;
+      if (mfcFields.classification) scrapedData.classification = mfcFields.classification;
+      if (mfcFields.materials) scrapedData.materials = mfcFields.materials;
+      if (mfcFields.dimensions) scrapedData.dimensions = mfcFields.dimensions;
+      if (mfcFields.jan) scrapedData.jan = mfcFields.jan;
+      if (mfcFields.tags && mfcFields.tags.length > 0) scrapedData.tags = mfcFields.tags;
+
+      // Use mfcTitle as the name if we don't have one yet
+      if (!scrapedData.name && mfcFields.title) {
+        scrapedData.name = mfcFields.title;
+      }
+    } catch (extractionError) {
+      console.error('[GENERIC SCRAPER] Schema v3 extraction failed:', extractionError);
+      // Don't fail the scrape - just continue without v3 data
+    }
+
     return scrapedData;
     
   } catch (error: any) {
@@ -788,58 +960,10 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
         Stack: ${error.stack}`);
     }
     // Specific error handling for test scenarios
-    const criticalErrors = [
-      'timeout', 
-      'disconnected', 
-      'Extraction failed', 
-      'Navigation failed', 
-      'ERR_NETWORK_CHANGED', 
-      'ERR_NAME_NOT_RESOLVED',
-      'ERR_CONNECTION_REFUSED', 
-      'ERR_CERT_AUTHORITY_INVALID',
-      'ERR_DNS_MALFORMED_RESPONSE',
-      'Failed to launch the browser process',
-      'Failed to create page',
-      'Protocol error: Browser closed',
-      'Invalid viewport dimensions',
-      'Invalid user agent string', 
-      'Invalid header value',
-      'Evaluation failed: Timeout',
-      'ReferenceError',
-      'Cannot read property',
-      'Invalid selector',
-      'Process out of memory',
-      'Page crashed',
-      'Browser became unresponsive',
-      'Network interruption',
-      'ERR_PROXY_CONNECTION_FAILED',
-      'DNS over HTTPS error',
-      'DOMException',
-      'HTTP 503',
-      'HTTP 502',
-      'Rate limiting',
-      'Maintenance mode',
-      'Isolated failure',
-      'Unknown argument',
-      'ENOSPC',
-      'HTTP 404',
-      'HTTP 500',
-      'HTTP 429',
-      // User-facing errors that should reach the user
-      'MFC_ITEM_NOT_ACCESSIBLE',
-      'NSFW_AUTH_REQUIRED'
-    ];
-
-    const isCriticalError = criticalErrors.some(errorType => 
-      error.message.includes(errorType) || error.message === errorType
-    );
-
-    if (isCriticalError) {
-      throw error;
-    }
-
-    // Return partial error recovery result
-    return { error: error.message };
+    // All errors should throw - the queue will handle retries and failure reporting
+    // Previously, non-critical errors returned { error: ... } which was treated as success,
+    // causing empty figures to be created in the database (Issue: sync creating empty entries)
+    throw error;
   } finally {
     try {
       // Close browser context (browser stays alive for pool reuse)
@@ -856,7 +980,7 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
     // Return browser to pool if it came from the pool
     /* istanbul ignore next - Finally block execution varies in mocked tests */
     if (browser && isPooledBrowser) {
-      BrowserPool.returnBrowser(browser);
+      await BrowserPool.returnBrowser(browser);
       console.log('[GENERIC SCRAPER] Browser returned to pool');
     }
 
@@ -866,14 +990,53 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
 }
 
 // Convenience function for MFC scraping
+// Strategy: Always use cookies when available to capture user-specific data
+// (collection status, personal notes, NSFW content access)
 export async function scrapeMFC(url: string, mfcAuth?: any): Promise<ScrapedData> {
   const config: ScrapeConfig = { ...SITE_CONFIGS.mfc };
+
+  // Parse cookies if provided
+  let parsedCookies: Record<string, string> | undefined;
   if (mfcAuth) {
-    // Parse JSON string if needed, then wrap in sessionCookies structure
-    const cookiesObj = typeof mfcAuth === 'string' ? JSON.parse(mfcAuth) : mfcAuth;
-    config.mfcAuth = { sessionCookies: cookiesObj };
+    if (typeof mfcAuth === 'string') {
+      try {
+        parsedCookies = JSON.parse(mfcAuth);
+      } catch {
+        throw new Error('Invalid MFC auth cookie format');
+      }
+    } else {
+      parsedCookies = mfcAuth;
+    }
   }
-  return scrapeGeneric(url, config);
+
+  // Always use cookies when available (captures user-specific data)
+  if (parsedCookies) {
+    console.log('[MFC SCRAPER] Scraping with authentication (user-specific data enabled)...');
+    const authConfig: ScrapeConfig = {
+      ...config,
+      mfcAuth: { sessionCookies: parsedCookies }
+    };
+
+    try {
+      const result = await scrapeGeneric(url, authConfig);
+      console.log('[MFC SCRAPER] Scrape succeeded with authentication');
+      return result;
+    } catch (error: any) {
+      console.log('[MFC SCRAPER] Scrape failed with authentication:', error.message);
+      throw error;
+    }
+  }
+
+  // Fallback: No cookies provided - use public scraping
+  console.log('[MFC SCRAPER] Scraping without authentication (no cookies provided)...');
+  try {
+    const result = await scrapeGeneric(url, config);
+    console.log('[MFC SCRAPER] Scrape succeeded without authentication');
+    return result;
+  } catch (error: any) {
+    console.log('[MFC SCRAPER] Scrape failed:', error.message);
+    throw error;
+  }
 }
 
 // Graceful shutdown

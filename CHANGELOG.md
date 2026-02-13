@@ -5,6 +5,27 @@ All notable changes to the Scraper service will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.6] - 2026-01-01
+
+### Fixed
+- **Concurrent Processing Race Condition**: Fixed scrape queue allowing multiple simultaneous scrapes
+  - Added double-lock guard (processingItem + isProcessing) to prevent concurrent execution
+  - Added cooldownWaitTimerId to deduplicate retry timers when all items blocked
+  - Prevents browser resource exhaustion that caused navigation timeouts
+- **Session ID Truncation**: Return full session ID for resume/cancel operations
+  - Previously truncated to 8 chars which broke session lookup
+
+### Added
+- **Schema v3 MFC Field Extraction**: Extract individual fields from MFC pages
+  - Title, origin, version, category, classification
+  - Materials, dimensions, JAN/UPC barcode
+  - Tags (18+, Castoff, Limited, etc.)
+- **Enhanced Company Extraction**: Parse company role from MFC HTML structure
+  - Extracts role (Manufacturer, Distributor, Retailer) per company
+  - Extracts MFC ID from company links
+
+---
+
 ## [2.0.5] - 2025-11-29
 
 ### Changed
