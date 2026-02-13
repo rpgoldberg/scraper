@@ -116,10 +116,34 @@ router.post('/scrape/mfc', async (req, res) => {
 // Get available site configurations
 router.get('/configs', (req, res) => {
   console.log('[SCRAPER API] Received configs request');
-  
+
   res.json({
     success: true,
     data: SITE_CONFIGS
+  });
+});
+
+// Get MFC cookie allowlist - used by frontend to generate dynamic cookie extraction script
+// HttpOnly cookies (like cf_clearance) cannot be read by JavaScript and must be manually copied
+router.get('/mfc/cookie-allowlist', (req, res) => {
+  console.log('[SCRAPER API] Received MFC cookie allowlist request');
+
+  const allowedCookies = process.env.MFC_ALLOWED_COOKIES
+    ? process.env.MFC_ALLOWED_COOKIES.split(',').map(s => s.trim()).filter(s => s.length > 0)
+    : ['PHPSESSID', 'sesUID', 'sesDID', 'cf_clearance'];
+
+  // cf_clearance is HttpOnly (Cloudflare sets it) - JavaScript can't read it
+  const httpOnlyCookies = ['cf_clearance'];
+
+  res.json({
+    success: true,
+    data: {
+      allowedCookies,
+      // Cookies that can be extracted via document.cookie (JavaScript readable)
+      scriptReadable: allowedCookies.filter(c => !httpOnlyCookies.includes(c)),
+      // Cookies that must be manually copied from Application tab
+      manualCopy: allowedCookies.filter(c => httpOnlyCookies.includes(c)),
+    }
   });
 });
 

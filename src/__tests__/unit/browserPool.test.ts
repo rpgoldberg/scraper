@@ -5,6 +5,28 @@ import { createMockBrowser } from '../__mocks__/puppeteer';
 
 // Centralized Puppeteer mock from moduleNameMapper
 
+/**
+ * Creates a smart evaluate mock that returns the correct type based on the
+ * function being evaluated. Returns a string for document.body.innerText calls
+ * (used for Cloudflare detection and MFC 404 checks) and an object for
+ * data extraction calls (used for scraping selectors).
+ */
+function createSmartEvaluateMock(dataResult: any = {}) {
+  return jest.fn().mockImplementation((fn: any, ...args: any[]) => {
+    if (typeof fn === 'function') {
+      const fnString = fn.toString();
+      if (fnString.includes('document.body.innerText') || fnString.includes('document.body.textContent')) {
+        return Promise.resolve('Mock page body text content');
+      }
+      // Data extraction calls have parameters (selectors)
+      if (args.length > 0 || fnString.includes('selectors') || fnString.includes('data')) {
+        return Promise.resolve(dataResult);
+      }
+    }
+    return Promise.resolve(dataResult);
+  });
+}
+
 // We need to test the BrowserPool class, but it's private
 // So we'll test through the public interface and some creative module manipulation
 describe('Browser Pool Management', () => {
@@ -12,12 +34,15 @@ describe('Browser Pool Management', () => {
   let mockBrowser: jest.Mocked<puppeteer.Browser>;
 
   beforeEach(async () => {
-    jest.clearAllMocks(); 
+    jest.clearAllMocks();
     jest.resetModules();
-    
+
     // Comprehensive reset using new reset method
     await BrowserPool.reset();
-    
+
+    // Also clear any cached stealth browser
+    (BrowserPool as any).stealthBrowser = null;
+
     // Don't mock BrowserPool.getBrowser for these tests - let it use the real implementation
 
     // Setup launch mock to return our mock browser
@@ -28,7 +53,7 @@ describe('Browser Pool Management', () => {
     mockPage = {
       goto: jest.fn().mockResolvedValue({ status: () => 200 }),
       title: jest.fn().mockResolvedValue('Test Page'),
-      evaluate: jest.fn().mockResolvedValue({}),
+      evaluate: createSmartEvaluateMock(),
       close: jest.fn().mockResolvedValue(undefined),
       setViewport: jest.fn().mockResolvedValue(undefined),
       setUserAgent: jest.fn().mockResolvedValue(undefined),
@@ -171,12 +196,12 @@ describe('Browser Pool Management', () => {
     });
 
     it('should retrieve browsers from pool during scraping', async () => {
-      
+
       // Mock the page.evaluate to return quickly
       mockBrowser.newPage.mockResolvedValue({
         ...mockPage,
         goto: jest.fn().mockResolvedValue(undefined),
-        evaluate: jest.fn().mockResolvedValue({}),
+        evaluate: createSmartEvaluateMock(),
       });
 
       // This should trigger browser pool initialization and usage
@@ -206,7 +231,7 @@ describe('Browser Pool Management', () => {
               setExtraHTTPHeaders: jest.fn().mockResolvedValue(undefined),
               goto: jest.fn().mockResolvedValue(undefined),
               title: jest.fn().mockResolvedValue('Emergency Page'),
-              evaluate: jest.fn().mockResolvedValue({}),
+              evaluate: createSmartEvaluateMock(),
               close: jest.fn().mockResolvedValue(undefined),
             }),
             close: jest.fn().mockResolvedValue(undefined),
@@ -238,7 +263,7 @@ describe('Browser Pool Management', () => {
         setExtraHTTPHeaders: jest.fn().mockResolvedValue(undefined),
         goto: jest.fn().mockResolvedValue(undefined),
         title: jest.fn().mockResolvedValue('Test Page'),
-        evaluate: jest.fn().mockResolvedValue({ name: 'Test' }),
+        evaluate: createSmartEvaluateMock({ name: 'Test' }),
         close: jest.fn().mockResolvedValue(undefined),
       });
 
@@ -273,7 +298,7 @@ describe('Browser Pool Management', () => {
         setExtraHTTPHeaders: jest.fn().mockResolvedValue(undefined),
         goto: jest.fn().mockResolvedValue(undefined),
         title: jest.fn().mockResolvedValue('Test Page'),
-        evaluate: jest.fn().mockResolvedValue({}),
+        evaluate: createSmartEvaluateMock(),
         close: jest.fn().mockResolvedValue(undefined),
       });
 
@@ -324,7 +349,7 @@ describe('Browser Pool Management', () => {
         setExtraHTTPHeaders: jest.fn().mockResolvedValue(undefined),
         goto: jest.fn().mockResolvedValue(undefined),
         title: jest.fn().mockResolvedValue('Load Test'),
-        evaluate: jest.fn().mockResolvedValue({}),
+        evaluate: createSmartEvaluateMock(),
         close: jest.fn().mockResolvedValue(undefined),
       });
 
@@ -679,7 +704,14 @@ describe('Browser Pool Management', () => {
       let requestCount = 0;
 
       // Mock page.evaluate to track localStorage per request
+      // Must also handle document.body.innerText calls from scrapeGeneric
       mockPage.evaluate = jest.fn().mockImplementation((fn: any, ...args: any[]) => {
+        if (typeof fn === 'function') {
+          const fnString = fn.toString();
+          if (fnString.includes('document.body.innerText') || fnString.includes('document.body.textContent')) {
+            return Promise.resolve('Mock page body text content');
+          }
+        }
         if (args.length === 2) {
           if (requestCount === 0) {
             request1Storage.set(args[0], args[1]);
@@ -687,7 +719,7 @@ describe('Browser Pool Management', () => {
             request2Storage.set(args[0], args[1]);
           }
         }
-        return Promise.resolve();
+        return Promise.resolve({});
       });
 
       // Create mock context
@@ -723,6 +755,9 @@ describe('Browser Pool Management', () => {
     it('should not log sensitive MFC session cookies', async () => {
       // Spy on console.log to capture log output
       const consoleLogSpy = jest.spyOn(console, 'log');
+
+      // Add setCookie to mockPage since mfcAuth config will trigger cookie injection
+      mockPage.setCookie = jest.fn().mockResolvedValue(undefined);
 
       // Create mock context
       const mockContext = {

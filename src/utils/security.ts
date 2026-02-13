@@ -91,6 +91,33 @@ export function truncateString(str: string, maxLength: number = MAX_STRING_LENGT
 }
 
 /**
+ * Validates that a URL is safe for webhook requests.
+ * Prevents SSRF attacks by blocking:
+ * - Non-HTTP(S) schemes (e.g., file://, ftp://)
+ * - Private/internal IP addresses (localhost, 127.0.0.1, 10.x, 192.168.x, 172.16-31.x)
+ * - IPv6 loopback (::1)
+ *
+ * @param url - URL to validate
+ * @returns true if URL is safe for webhook requests
+ */
+export function isValidWebhookUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    // Only allow http/https schemes
+    if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+    // Block private/internal IPs in production
+    const hostname = parsed.hostname.toLowerCase();
+    if (process.env.NODE_ENV !== 'test' && process.env.NODE_ENV !== 'development') {
+      if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') return false;
+      if (hostname.startsWith('10.') || hostname.startsWith('192.168.') || hostname.match(/^172\.(1[6-9]|2\d|3[01])\./)) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Sanitizes an object for safe logging by converting it to JSON
  * and sanitizing the resulting string.
  *
