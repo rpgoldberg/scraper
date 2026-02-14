@@ -388,6 +388,8 @@ export class ScrapeQueue {
       const promise = new Promise<ScrapedData>((resolve, reject) => {
         existingItem.resolvers.push({ resolve, reject });
       });
+      // Prevent unhandled rejection crash when items are cancelled
+      promise.catch(() => {});
 
       console.log(`[SCRAPE QUEUE] Deduplicated request for MFC ${mfcId} (${existingItem.waitingUserIds.length} users waiting)`);
 
@@ -428,6 +430,8 @@ export class ScrapeQueue {
     const promise = new Promise<ScrapedData>((resolve, reject) => {
       item.resolvers.push({ resolve, reject });
     });
+    // Prevent unhandled rejection crash when items are cancelled
+    promise.catch(() => {});
 
     // Add to appropriate queue
     this.addToQueue(item);
