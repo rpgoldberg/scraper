@@ -683,6 +683,13 @@ See `.env.example` for complete configuration template.
 - `PORT`: Server port (prod: 3050, local dev: 3080, test: 3070, Coolify dev: 3090)
 - `NODE_ENV`: Environment mode (development, test, production)
 
+**Required in Docker/Production:**
+- `BACKEND_URL`: Backend service URL for webhook callbacks during MFC sync
+  - Docker prod: `http://backend:5050`
+  - Docker Coolify dev: `http://backend:5090`
+  - Local dev: `http://localhost:5080`
+  - (Must be reachable from the scraper container; used by the webhook client to send sync progress to backend)
+
 **Optional:**
 - `PUPPETEER_EXECUTABLE_PATH`: Custom Chrome/Chromium executable path
   - Useful for CI/CD environments or custom browser installations

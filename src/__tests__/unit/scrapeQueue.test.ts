@@ -531,6 +531,46 @@ describe('scrapeQueue', () => {
       });
     });
 
+    describe('cancellation without caller-side catch', () => {
+      it('should not cause unhandled rejection when caller does not catch the promise', async () => {
+        const queue = getScrapeQueue();
+
+        // Enqueue WITHOUT attaching .catch() on the caller side
+        // The internal promise.catch(() => {}) added in the fix should prevent
+        // Node from crashing with an unhandled rejection
+        const { promise } = queue.enqueue('no-catch-item');
+
+        // Cancel the item - this rejects the promise internally
+        const result = queue.cancel('no-catch-item');
+        expect(result).toBe(true);
+
+        // Allow microtasks to flush so any unhandled rejection would surface
+        await new Promise(resolve => setTimeout(resolve, 50));
+
+        // If we reach here without unhandled rejection, the fix works.
+        // Verify the promise does reject (it should be caught internally)
+        await expect(promise).rejects.toBeDefined();
+      });
+
+      it('should not cause unhandled rejection for deduplicated items on cancel', async () => {
+        const queue = getScrapeQueue();
+
+        // First enqueue creates the item
+        queue.enqueue('dedup-item');
+        // Second enqueue deduplicates and returns a new promise - do NOT catch
+        const { promise: deduplicatedPromise, deduplicated } = queue.enqueue('dedup-item');
+        expect(deduplicated).toBe(true);
+
+        // Cancel the item - both promises get rejected
+        queue.cancel('dedup-item');
+
+        await new Promise(resolve => setTimeout(resolve, 50));
+
+        // Both promises should reject without crashing the process
+        await expect(deduplicatedPromise).rejects.toBeDefined();
+      });
+    });
+
     describe('getPendingCountForSession', () => {
       it('should return correct count for session', () => {
         const queue = getScrapeQueue();
