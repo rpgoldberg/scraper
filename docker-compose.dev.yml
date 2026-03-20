@@ -1,0 +1,30 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+  scraper:
+    build:
+      context: .
+      target: development
+    ports:
+      - "3080:3050"
+    environment:
+      - NODE_ENV=development
+      - PORT=3050
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src
+    shm_size: '2gb'
+volumes:
+  redis-data:

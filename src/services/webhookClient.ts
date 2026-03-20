@@ -185,7 +185,7 @@ export async function notifyItemComplete(payload: ItemCompletePayload): Promise<
 
 /**
  * Notify backend of a sync phase change.
- * Called from syncOrchestrator during sync lifecycle.
+ * Called during sync lifecycle (typically from plugin sync workflow).
  */
 export async function notifyPhaseChange(payload: PhaseChangePayload): Promise<boolean> {
   const config = webhookConfigs.get(payload.sessionId);
@@ -217,8 +217,8 @@ export interface ListsSyncPayload {
 }
 
 /**
- * Notify backend to sync user's MFC lists.
- * Called from syncOrchestrator after fetchUserLists succeeds.
+ * Notify backend to sync user's lists.
+ * Called from plugin sync workflow after fetching user lists.
  */
 export async function notifyListsSync(payload: ListsSyncPayload): Promise<boolean> {
   const config = webhookConfigs.get(payload.sessionId);

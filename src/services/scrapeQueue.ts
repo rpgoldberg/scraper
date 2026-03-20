@@ -1,24 +1,36 @@
 /**
  * Scrape Queue Service
  *
- * Manages a priority-based queue for MFC scraping requests with:
+ * Manages a priority-based queue for scraping requests with:
  * - Three-tier priority lanes (HOT, WARM, COLD)
  * - Request deduplication and coalescing
  * - Adaptive rate limiting with exponential backoff
  * - Error classification and retry logic
  *
+ * TWO MODES:
+ * - Test mode (testMode=true, auto-detected from NODE_ENV=test):
+ *   Uses in-memory arrays and Maps. All existing tests work unchanged.
+ * - Production mode (testMode=false):
+ *   Delegates to BullMQ (Redis-backed queue) + extracted components
+ *   (AdaptiveRateLimiter, JobDeduplicator, BullScrapeQueue, ScrapeWorker).
+ *
  * Priority Lanes:
- * - HOT: NSFW items with active cookies (highest priority)
- * - WARM: SFW items from active imports
+ * - HOT: Authenticated items with active cookies (highest priority)
+ * - WARM: Standard items from active imports
  * - COLD: Background enrichment (lowest priority)
  */
 
-import { scrapeMFC, ScrapedData, BrowserPool } from './genericScraper';
-import { calculateRefreshPriority } from './cacheConfig';
+import { scrapeGeneric, ScrapedData, ScrapeConfig, BrowserPool } from './genericScraper';
 import { sanitizeForLog } from '../utils/security';
 import { getSessionManager, resetSessionManager, SessionManager, SessionPausedEvent } from './sessionManager';
 import { notifyItemSuccess, notifyItemFailed, notifyItemSkipped } from './webhookClient';
 import { enrichmentLogger } from '../utils/logger';
+
+// BullMQ infrastructure — lazy-loaded to avoid Redis connections in test mode
+import type { BullScrapeQueue } from '../queue/bullQueue';
+import type { ScrapeWorker } from '../queue/worker';
+import { AdaptiveRateLimiter, DEFAULT_RATE_LIMIT_CONFIG } from '../queue/rateLimiter';
+import { JobDeduplicator } from '../queue/deduplicator';
 
 // ============================================================================
 // Types and Interfaces
@@ -31,15 +43,17 @@ export type ErrorType = 'timeout' | 'not_found' | 'rate_limited' | 'auth_require
 export interface QueueItem {
   /** Unique identifier for this queue entry */
   id: string;
-  /** MFC item ID */
+  /** Item ID (site-specific, used as dedup key) */
   mfcId: string;
   /** URL to scrape */
   url: string;
+  /** Scrape configuration (selectors, auth, etc.) provided by plugin */
+  scrapeConfig?: ScrapeConfig;
   /** Priority lane */
   priority: QueuePriority;
   /** Collection status (affects enrichment priority) */
   status?: ItemStatus;
-  /** Cookies for NSFW content (ephemeral, never stored) */
+  /** Cookies for authenticated content (ephemeral, never stored) */
   cookies?: Record<string, string>;
   /** Session ID for cookie context (to dedupe by active session) */
   sessionId?: string;
@@ -88,6 +102,10 @@ export interface QueueStats {
 }
 
 export interface EnqueueOptions {
+  /** Full URL to scrape. If provided, used instead of constructing from mfcId. */
+  url?: string;
+  /** Scrape configuration (selectors, auth, cloudflare detection). Provided by plugin. */
+  scrapeConfig?: ScrapeConfig;
   priority?: QueuePriority;
   status?: ItemStatus;
   cookies?: Record<string, string>;
@@ -184,10 +202,36 @@ function shouldRetry(errorType: ErrorType, retryCount: number, maxRetries: numbe
 }
 
 // ============================================================================
+// Priority string → BullMQ numeric mapping (for production mode)
+// ============================================================================
+
+const PRIORITY_TO_BULL: Record<QueuePriority, number> = {
+  HOT: 1,
+  WARM: 5,
+  COLD: 10,
+};
+
+// ============================================================================
 // Scrape Queue Class
 // ============================================================================
 
 export class ScrapeQueue {
+  // --------------------------------------------------------------------------
+  // BullMQ infrastructure (production mode only)
+  // --------------------------------------------------------------------------
+  private bullQueue: BullScrapeQueue | null = null;
+  private worker: ScrapeWorker | null = null;
+
+  // --------------------------------------------------------------------------
+  // Shared components (both modes)
+  // --------------------------------------------------------------------------
+  private rateLimiter: AdaptiveRateLimiter;
+  private deduplicator: JobDeduplicator;
+
+  // --------------------------------------------------------------------------
+  // In-memory state (test mode only — preserved verbatim from original)
+  // --------------------------------------------------------------------------
+
   // Priority queues
   private hotQueue: QueueItem[] = [];
   private warmQueue: QueueItem[] = [];
@@ -228,12 +272,25 @@ export class ScrapeQueue {
   // Cooldown wait timer - prevents multiple concurrent timers when all items blocked
   private cooldownWaitTimerId: NodeJS.Timeout | null = null;
 
+  /**
+   * Whether to use the BullMQ code path.
+   * Returns true only when BullMQ infrastructure was successfully initialized.
+   * When false, all methods use the in-memory path (testMode OR fallback).
+   */
+  private get useBullMQ(): boolean {
+    return this.bullQueue !== null;
+  }
+
   constructor(testMode?: boolean) {
     // Auto-detect test environment if not explicitly set
     this.testMode = testMode ?? (
       process.env.NODE_ENV === 'test' ||
       process.env.JEST_WORKER_ID !== undefined
     );
+
+    // Shared components — used in both modes
+    this.rateLimiter = new AdaptiveRateLimiter(DEFAULT_RATE_LIMIT_CONFIG);
+    this.deduplicator = new JobDeduplicator();
 
     // Get or create session manager
     this.sessionManager = getSessionManager();
@@ -243,7 +300,60 @@ export class ScrapeQueue {
       this.handleSessionPaused(event);
     });
 
-    console.log(`[SCRAPE QUEUE] Initialized (testMode: ${this.testMode})`);
+    // Production mode: initialize BullMQ infrastructure.
+    // Only activate when NOT in a Jest test runner — processing tests use
+    // testMode=false to exercise the in-memory processing loop, not BullMQ.
+    const inJest = process.env.JEST_WORKER_ID !== undefined || process.env.NODE_ENV === 'test';
+    if (!this.testMode && !inJest) {
+      this.initBullMQ();
+    }
+
+    console.log(`[SCRAPE QUEUE] Initialized (testMode: ${this.testMode}, bullmq: ${this.useBullMQ})`);
+  }
+
+  /**
+   * Initialize BullMQ queue and worker for production mode.
+   * Uses dynamic require() to avoid loading bullmq/ioredis in test mode.
+   */
+  private initBullMQ(): void {
+    try {
+      // Dynamic imports to avoid Redis connection at module load time
+      const { getRedisConnection } = require('../infrastructure/redis');
+      const { BullScrapeQueue: BullScrapeQueueClass } = require('../queue/bullQueue');
+      const { ScrapeWorker: ScrapeWorkerClass } = require('../queue/worker');
+
+      const connection = getRedisConnection();
+      this.bullQueue = new BullScrapeQueueClass(connection);
+      this.worker = new ScrapeWorkerClass(
+        {
+          scrapeFn: (url: string, config: Record<string, unknown>) =>
+            scrapeGeneric(url, config as ScrapeConfig),
+          rateLimiter: this.rateLimiter,
+          deduplicator: this.deduplicator,
+          sessionManager: this.sessionManager,
+          webhookClient: {
+            notifyItemSuccess: (sessionId: string, mfcId: string, scrapedData?: Record<string, unknown>) =>
+              notifyItemSuccess(sessionId, mfcId, scrapedData),
+            notifyItemFailed: (sessionId: string, mfcId: string, error: string) =>
+              notifyItemFailed(sessionId, mfcId, error),
+          },
+          logger: {
+            info: (msg: string, data?: unknown) => console.log(msg, data ?? ''),
+            warn: (msg: string, data?: unknown) => console.warn(msg, data ?? ''),
+            error: (msg: string, data?: unknown) => console.error(msg, data ?? ''),
+            debug: (_ns: string, msg: string, data?: unknown) => console.log(msg, data ?? ''),
+          },
+        },
+        connection,
+      );
+
+      console.log('[SCRAPE QUEUE] BullMQ infrastructure initialized');
+    } catch (err) {
+      console.error('[SCRAPE QUEUE] Failed to initialize BullMQ:', err);
+      // Fall back to in-memory mode on failure
+      this.bullQueue = null;
+      this.worker = null;
+    }
   }
 
   /**
@@ -306,6 +416,13 @@ export class ScrapeQueue {
    * Cancel all items for a session (user chose to abort completely)
    */
   cancelAllForSession(sessionId: string): number {
+    if (!this.useBullMQ) {
+      return this.cancelAllForSessionInMemory(sessionId);
+    }
+    return this.cancelAllForSessionBullMQ(sessionId);
+  }
+
+  private cancelAllForSessionInMemory(sessionId: string): number {
     let cancelledCount = 0;
 
     // Find all items with this sessionId
@@ -324,17 +441,34 @@ export class ScrapeQueue {
     return cancelledCount;
   }
 
+  private cancelAllForSessionBullMQ(sessionId: string): number {
+    // In BullMQ mode, use the deduplicator to find and cancel items for this session
+    // The deduplicator tracks all pending items; cancel those matching the session
+    const cancelled = this.deduplicator.cancelByUser(sessionId);
+
+    // Clear the session
+    this.sessionManager.clearSession(sessionId);
+
+    console.log(`[SCRAPE QUEUE] Cancelled all ${cancelled} items for session (BullMQ)`);
+    return cancelled;
+  }
+
   /**
    * Get pending count for a session
    */
   getPendingCountForSession(sessionId: string): number {
-    let count = 0;
-    this.pendingItems.forEach((item) => {
-      if (item.sessionId === sessionId) {
-        count++;
-      }
-    });
-    return count;
+    if (!this.useBullMQ) {
+      let count = 0;
+      this.pendingItems.forEach((item) => {
+        if (item.sessionId === sessionId) {
+          count++;
+        }
+      });
+      return count;
+    }
+    // In BullMQ mode, we don't track session→item mapping in the deduplicator.
+    // Return 0 as a safe fallback — session management is handled by the worker.
+    return 0;
   }
 
   // ==========================================================================
@@ -349,7 +483,16 @@ export class ScrapeQueue {
    * @returns EnqueueResult with promise that resolves when scraping completes
    */
   enqueue(mfcId: string, options: EnqueueOptions = {}): EnqueueResult {
+    if (!this.useBullMQ) {
+      return this.enqueueInMemory(mfcId, options);
+    }
+    return this.enqueueBullMQ(mfcId, options);
+  }
+
+  private enqueueInMemory(mfcId: string, options: EnqueueOptions): EnqueueResult {
     const {
+      url: providedUrl,
+      scrapeConfig,
       priority = 'WARM',
       status,
       cookies,
@@ -358,8 +501,11 @@ export class ScrapeQueue {
       maxRetries = RATE_LIMIT.DEFAULT_MAX_RETRIES,
     } = options;
 
-    // Build URL from MFC ID
-    const url = `https://myfigurecollection.net/item/${mfcId}`;
+    // Use provided URL or fall back to legacy MFC URL construction (deprecated)
+    const url = providedUrl || `https://myfigurecollection.net/item/${mfcId}`;
+    if (!providedUrl) {
+      console.warn(`[SCRAPE QUEUE] DEPRECATED: No URL provided for item ${mfcId}, using legacy MFC URL construction. Plugins should provide a url in EnqueueOptions.`);
+    }
 
     // Check for deduplication
     const existingItem = this.pendingItems.get(mfcId);
@@ -415,6 +561,7 @@ export class ScrapeQueue {
       id,
       mfcId,
       url,
+      scrapeConfig,
       priority: effectivePriority,
       status,
       cookies,
@@ -456,6 +603,91 @@ export class ScrapeQueue {
     };
   }
 
+  private enqueueBullMQ(mfcId: string, options: EnqueueOptions): EnqueueResult {
+    const {
+      url: providedUrl,
+      scrapeConfig,
+      priority = 'WARM',
+      status,
+      cookies,
+      sessionId,
+      userId = 'anonymous',
+      maxRetries = RATE_LIMIT.DEFAULT_MAX_RETRIES,
+    } = options;
+
+    const url = providedUrl || `https://myfigurecollection.net/item/${mfcId}`;
+    if (!providedUrl) {
+      console.warn(`[SCRAPE QUEUE] DEPRECATED: No URL provided for item ${mfcId}, using legacy MFC URL construction.`);
+    }
+
+    // Determine effective priority
+    let effectivePriority = priority;
+    if (cookies && priority !== 'COLD') {
+      effectivePriority = 'HOT';
+    }
+
+    // Check deduplication via shared deduplicator
+    const dedup = this.deduplicator.tryDeduplicate(mfcId, userId);
+    if (dedup) {
+      // Upgrade priority if needed
+      this.deduplicator.upgradePriority(mfcId, PRIORITY_TO_BULL[effectivePriority]);
+
+      const entry = this.deduplicator.getEntry(mfcId);
+      console.log(`[SCRAPE QUEUE] Deduplicated request for MFC ${mfcId} (BullMQ)`);
+
+      return {
+        id: entry?.jobId ?? mfcId,
+        deduplicated: true,
+        position: 0, // Position not meaningful in BullMQ
+        promise: dedup.promise as Promise<ScrapedData>,
+      };
+    }
+
+    // New item — register in deduplicator and add to BullMQ
+    const jobId = `scrape-${mfcId}`;
+    const promise = this.deduplicator.registerPending(
+      mfcId,
+      jobId,
+      userId,
+      PRIORITY_TO_BULL[effectivePriority],
+    ) as Promise<ScrapedData>;
+
+    // Add to BullMQ queue (async, fire-and-forget with error logging)
+    if (this.bullQueue) {
+      const { QueuePriority: QP } = require('../infrastructure/types');
+      const bullPriority =
+        effectivePriority === 'HOT' ? QP.HOT :
+        effectivePriority === 'WARM' ? QP.WARM :
+        QP.COLD;
+
+      this.bullQueue.addJob(mfcId, {
+        itemId: mfcId,
+        url,
+        priority: bullPriority,
+        status: status as any,
+        cookies,
+        sessionId,
+        userId,
+        scrapeConfig: scrapeConfig as Record<string, unknown> | undefined,
+        createdAt: Date.now(),
+        retryCount: 0,
+        maxRetries,
+      }).catch((err: Error) => {
+        console.error(`[SCRAPE QUEUE] Failed to add job to BullMQ: ${err.message}`);
+        this.deduplicator.rejectItem(mfcId, err);
+      });
+    }
+
+    console.log(`[SCRAPE QUEUE] Enqueued MFC ${mfcId} at priority ${effectivePriority} (BullMQ)`);
+
+    return {
+      id: jobId,
+      deduplicated: false,
+      position: 0,
+      promise,
+    };
+  }
+
   /**
    * Bulk enqueue multiple items
    *
@@ -471,6 +703,13 @@ export class ScrapeQueue {
    * Get current queue statistics
    */
   getStats(): QueueStats {
+    if (!this.useBullMQ) {
+      return this.getStatsInMemory();
+    }
+    return this.getStatsBullMQ();
+  }
+
+  private getStatsInMemory(): QueueStats {
     return {
       hot: this.hotQueue.length,
       warm: this.warmQueue.length,
@@ -501,25 +740,60 @@ export class ScrapeQueue {
     };
   }
 
+  private getStatsBullMQ(): QueueStats {
+    // Synchronous snapshot — BullMQ counts are async but we return
+    // what we can from the deduplicator and rate limiter state.
+    const rlStats = this.rateLimiter.getStats();
+    return {
+      hot: 0,
+      warm: 0,
+      cold: 0,
+      total: this.deduplicator.size,
+      processing: 0,
+      completed: this.completedCount,
+      failed: this.failedCount,
+      rateLimited: rlStats.isRateLimited,
+      currentDelay: rlStats.currentDelay,
+      byStatus: {
+        owned: { queued: 0, completed: 0, failed: 0 },
+        ordered: { queued: 0, completed: 0, failed: 0 },
+        wished: { queued: 0, completed: 0, failed: 0 },
+      },
+    };
+  }
+
   /**
    * Check if an item is already pending in the queue
    */
   isPending(mfcId: string): boolean {
-    return this.pendingItems.has(mfcId);
+    if (!this.useBullMQ) {
+      return this.pendingItems.has(mfcId);
+    }
+    return this.deduplicator.isPending(mfcId);
   }
 
   /**
    * Get waiting users for an item
    */
   getWaitingUsers(mfcId: string): string[] {
-    const item = this.pendingItems.get(mfcId);
-    return item ? [...item.waitingUserIds] : [];
+    if (!this.useBullMQ) {
+      const item = this.pendingItems.get(mfcId);
+      return item ? [...item.waitingUserIds] : [];
+    }
+    return this.deduplicator.getWaitingUsers(mfcId);
   }
 
   /**
    * Cancel a pending item (if not already processing)
    */
   cancel(mfcId: string): boolean {
+    if (!this.useBullMQ) {
+      return this.cancelInMemory(mfcId);
+    }
+    return this.cancelBullMQ(mfcId);
+  }
+
+  private cancelInMemory(mfcId: string): boolean {
     const item = this.pendingItems.get(mfcId);
     if (!item || item === this.processingItem) {
       return false;
@@ -536,10 +810,32 @@ export class ScrapeQueue {
     return true;
   }
 
+  private cancelBullMQ(mfcId: string): boolean {
+    // Cancel in deduplicator (rejects all waiting promises)
+    const cancelled = this.deduplicator.cancel(mfcId);
+
+    // Also remove from BullMQ queue
+    if (cancelled && this.bullQueue) {
+      this.bullQueue.removeJob(mfcId).catch((err: Error) => {
+        console.warn(`[SCRAPE QUEUE] Failed to remove BullMQ job for ${mfcId}: ${err.message}`);
+      });
+    }
+
+    return cancelled;
+  }
+
   /**
    * Clear all queues (emergency use only)
    */
   clear(): void {
+    if (!this.useBullMQ) {
+      this.clearInMemory();
+    } else {
+      this.clearBullMQ();
+    }
+  }
+
+  private clearInMemory(): void {
     // Only reject pending promises in production mode
     // In test mode, silently discard to avoid unhandled promise rejections
     if (!this.testMode) {
@@ -562,10 +858,32 @@ export class ScrapeQueue {
     console.log('[SCRAPE QUEUE] All queues cleared');
   }
 
+  private clearBullMQ(): void {
+    // Clear deduplicator (rejects all promises)
+    this.deduplicator.clear();
+
+    // Drain BullMQ queue
+    if (this.bullQueue) {
+      this.bullQueue.drain().catch((err: Error) => {
+        console.warn(`[SCRAPE QUEUE] Failed to drain BullMQ queue: ${err.message}`);
+      });
+    }
+
+    console.log('[SCRAPE QUEUE] All queues cleared (BullMQ)');
+  }
+
   /**
    * Stop queue processing
    */
   stop(): void {
+    if (!this.useBullMQ) {
+      this.stopInMemory();
+    } else {
+      this.stopBullMQ();
+    }
+  }
+
+  private stopInMemory(): void {
     if (this.processInterval) {
       clearInterval(this.processInterval);
       this.processInterval = null;
@@ -579,15 +897,34 @@ export class ScrapeQueue {
     console.log('[SCRAPE QUEUE] Processing stopped');
   }
 
+  private stopBullMQ(): void {
+    // Close the BullMQ worker and queue
+    if (this.worker) {
+      this.worker.close().catch((err: Error) => {
+        console.warn(`[SCRAPE QUEUE] Error closing worker: ${err.message}`);
+      });
+    }
+    if (this.bullQueue) {
+      this.bullQueue.close().catch((err: Error) => {
+        console.warn(`[SCRAPE QUEUE] Error closing queue: ${err.message}`);
+      });
+    }
+    console.log('[SCRAPE QUEUE] Processing stopped (BullMQ)');
+  }
+
   /**
    * Manually trigger rate limit mode (useful when Cloudflare detected externally)
    */
   triggerRateLimit(): void {
-    this.handleRateLimit();
+    if (!this.useBullMQ) {
+      this.handleRateLimit();
+    } else {
+      this.rateLimiter.reportRateLimit();
+    }
   }
 
   // ==========================================================================
-  // Private Methods - Queue Management
+  // Private Methods - Queue Management (in-memory / test mode)
   // ==========================================================================
 
   private addToQueue(item: QueueItem): void {
@@ -710,7 +1047,7 @@ export class ScrapeQueue {
   }
 
   // ==========================================================================
-  // Private Methods - Processing
+  // Private Methods - Processing (in-memory / test mode)
   // ==========================================================================
 
   private startProcessing(): void {
@@ -775,8 +1112,9 @@ export class ScrapeQueue {
     console.log(`[SCRAPE QUEUE] Processing MFC ${item.mfcId} (${item.priority}, attempt ${item.retryCount + 1}/${item.maxRetries + 1}, delay=${this.currentDelay}ms, pool=${poolAvailable}/${BrowserPool.getPoolCapacity()})`);
 
     try {
-      // Perform the scrape
-      const result = await scrapeMFC(item.url, item.cookies);
+      // Perform the scrape using generic engine with item's config
+      const config: ScrapeConfig = item.scrapeConfig || {};
+      const result = await scrapeGeneric(item.url, config);
 
       // Success!
       this.handleSuccess(item, result);

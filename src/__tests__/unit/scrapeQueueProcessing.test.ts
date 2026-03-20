@@ -4,8 +4,8 @@
  * handleFailure, classifyError, shouldRetry, getNextProcessableItem
  */
 
-// Mock scrapeMFC to control scraping outcomes
-const mockScrapeMFC = jest.fn();
+// Mock scrapeGeneric to control scraping outcomes
+const mockScrapeGeneric = jest.fn();
 
 // Persistent mock objects that survive clearAllMocks
 const mockNotifyItemSuccess = jest.fn().mockResolvedValue(true);
@@ -13,7 +13,7 @@ const mockNotifyItemFailed = jest.fn().mockResolvedValue(true);
 const mockNotifyItemSkipped = jest.fn().mockResolvedValue(true);
 
 jest.mock('../../services/genericScraper', () => ({
-  scrapeMFC: (...args: any[]) => mockScrapeMFC(...args),
+  scrapeGeneric: (...args: any[]) => mockScrapeGeneric(...args),
   BrowserPool: {
     getStealthBrowser: jest.fn(),
     getBrowser: jest.fn(),
@@ -42,7 +42,7 @@ describe('ScrapeQueue - processing loop', () => {
     jest.clearAllMocks();
     jest.useFakeTimers({ advanceTimers: true });
     resetScrapeQueue();
-    mockScrapeMFC.mockReset();
+    mockScrapeGeneric.mockReset();
     // Re-establish mock return values after clearAllMocks
     mockNotifyItemSuccess.mockResolvedValue(true);
     mockNotifyItemFailed.mockResolvedValue(true);
@@ -68,7 +68,7 @@ describe('ScrapeQueue - processing loop', () => {
 
   it('should process an item successfully and resolve the promise', async () => {
     const scrapedData = { name: 'Test Figure', imageUrl: 'http://example.com/img.jpg' };
-    mockScrapeMFC.mockResolvedValue(scrapedData);
+    mockScrapeGeneric.mockResolvedValue(scrapedData);
 
     queue = new ScrapeQueue(false);
     const result = queue.enqueue('12345', { priority: 'WARM' });
@@ -77,7 +77,7 @@ describe('ScrapeQueue - processing loop', () => {
 
     const data = await result.promise;
     expect(data).toEqual(scrapedData);
-    expect(mockScrapeMFC).toHaveBeenCalled();
+    expect(mockScrapeGeneric).toHaveBeenCalled();
 
     const stats = queue.getStats();
     expect(stats.completed).toBe(1);
@@ -85,7 +85,7 @@ describe('ScrapeQueue - processing loop', () => {
   });
 
   it('should retry on timeout error', async () => {
-    mockScrapeMFC
+    mockScrapeGeneric
       .mockRejectedValueOnce(new Error('Navigation timeout exceeded'))
       .mockResolvedValueOnce({ name: 'Figure' });
 
@@ -101,11 +101,11 @@ describe('ScrapeQueue - processing loop', () => {
 
     const data = await result.promise;
     expect(data.name).toBe('Figure');
-    expect(mockScrapeMFC).toHaveBeenCalledTimes(2);
+    expect(mockScrapeGeneric).toHaveBeenCalledTimes(2);
   });
 
   it('should retry on network error', async () => {
-    mockScrapeMFC
+    mockScrapeGeneric
       .mockRejectedValueOnce(new Error('ERR_CONNECTION_REFUSED'))
       .mockResolvedValueOnce({ name: 'Figure' });
 
@@ -121,7 +121,7 @@ describe('ScrapeQueue - processing loop', () => {
   });
 
   it('should NOT retry on auth_required error', async () => {
-    mockScrapeMFC.mockRejectedValue(new Error('AUTH: authentication required'));
+    mockScrapeGeneric.mockRejectedValue(new Error('AUTH: authentication required'));
 
     queue = new ScrapeQueue(false);
     const result = queue.enqueue('12345', { priority: 'WARM' });
@@ -134,11 +134,11 @@ describe('ScrapeQueue - processing loop', () => {
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toContain('auth_required');
     // Should only have been called once (no retry for auth errors)
-    expect(mockScrapeMFC).toHaveBeenCalledTimes(1);
+    expect(mockScrapeGeneric).toHaveBeenCalledTimes(1);
   });
 
   it('should give up after max retries and reject promise', async () => {
-    mockScrapeMFC.mockRejectedValue(new Error('timeout exceeded'));
+    mockScrapeGeneric.mockRejectedValue(new Error('timeout exceeded'));
 
     queue = new ScrapeQueue(false);
     const result = queue.enqueue('12345', { priority: 'WARM', maxRetries: 1 });
@@ -158,7 +158,7 @@ describe('ScrapeQueue - processing loop', () => {
   });
 
   it('should classify 404 errors as not_found', async () => {
-    mockScrapeMFC.mockRejectedValue(new Error('MFC 404 - not found'));
+    mockScrapeGeneric.mockRejectedValue(new Error('MFC 404 - not found'));
 
     queue = new ScrapeQueue(false);
     const result = queue.enqueue('12345', { priority: 'WARM', maxRetries: 0 });
@@ -172,7 +172,7 @@ describe('ScrapeQueue - processing loop', () => {
   });
 
   it('should classify rate limit errors and trigger rate limit mode', async () => {
-    mockScrapeMFC.mockRejectedValue(new Error('CLOUDFLARE: Rate limited'));
+    mockScrapeGeneric.mockRejectedValue(new Error('CLOUDFLARE: Rate limited'));
 
     queue = new ScrapeQueue(false);
     const result = queue.enqueue('12345', { priority: 'WARM', maxRetries: 0 });
@@ -186,7 +186,7 @@ describe('ScrapeQueue - processing loop', () => {
   });
 
   it('should reduce delay after consecutive successes', async () => {
-    mockScrapeMFC.mockResolvedValue({ name: 'Figure' });
+    mockScrapeGeneric.mockResolvedValue({ name: 'Figure' });
 
     queue = new ScrapeQueue(false);
     // First trigger rate limit to increase delay
@@ -213,7 +213,7 @@ describe('ScrapeQueue - processing loop', () => {
   });
 
   it('should track per-status completion', async () => {
-    mockScrapeMFC.mockResolvedValue({ name: 'Figure' });
+    mockScrapeGeneric.mockResolvedValue({ name: 'Figure' });
 
     queue = new ScrapeQueue(false);
     const r1 = queue.enqueue('1', { priority: 'WARM', status: 'owned' });
@@ -231,7 +231,7 @@ describe('ScrapeQueue - processing loop', () => {
   });
 
   it('should call webhook on success for session items', async () => {
-    mockScrapeMFC.mockResolvedValue({ name: 'Figure' });
+    mockScrapeGeneric.mockResolvedValue({ name: 'Figure' });
 
     queue = new ScrapeQueue(false);
     // Use WARM without cookies to avoid session manager cookie-failure path
@@ -248,7 +248,7 @@ describe('ScrapeQueue - processing loop', () => {
   });
 
   it('should call webhook on permanent failure for non-cookie session items', async () => {
-    mockScrapeMFC.mockRejectedValue(new Error('AUTH: required'));
+    mockScrapeGeneric.mockRejectedValue(new Error('AUTH: required'));
 
     queue = new ScrapeQueue(false);
     // Use WARM without cookies so the standard retry/failure path runs (not session manager)
@@ -267,7 +267,7 @@ describe('ScrapeQueue - processing loop', () => {
   });
 
   it('should handle Cloudflare rate limit with session reporting', async () => {
-    mockScrapeMFC.mockRejectedValue(new Error('Cloudflare blocked'));
+    mockScrapeGeneric.mockRejectedValue(new Error('Cloudflare blocked'));
 
     queue = new ScrapeQueue(false);
     const result = queue.enqueue('12345', {
@@ -286,7 +286,7 @@ describe('ScrapeQueue - processing loop', () => {
   });
 
   it('should handle unknown error type', async () => {
-    mockScrapeMFC.mockRejectedValue(new Error('Something weird happened'));
+    mockScrapeGeneric.mockRejectedValue(new Error('Something weird happened'));
 
     queue = new ScrapeQueue(false);
     const result = queue.enqueue('12345', { priority: 'WARM', maxRetries: 0 });
@@ -300,7 +300,7 @@ describe('ScrapeQueue - processing loop', () => {
   });
 
   it('should stop processing when queue is empty', async () => {
-    mockScrapeMFC.mockResolvedValue({ name: 'Figure' });
+    mockScrapeGeneric.mockResolvedValue({ name: 'Figure' });
 
     queue = new ScrapeQueue(false);
     const result = queue.enqueue('12345', { priority: 'WARM' });
@@ -317,7 +317,7 @@ describe('ScrapeQueue - processing loop', () => {
   });
 
   it('should track per-status failed counts', async () => {
-    mockScrapeMFC.mockRejectedValue(new Error('AUTH: fail'));
+    mockScrapeGeneric.mockRejectedValue(new Error('AUTH: fail'));
 
     queue = new ScrapeQueue(false);
     const result = queue.enqueue('1', { priority: 'WARM', status: 'owned', maxRetries: 0 });

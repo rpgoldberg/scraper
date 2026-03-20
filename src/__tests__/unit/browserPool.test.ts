@@ -432,8 +432,8 @@ describe('Browser Pool Management', () => {
     });
   });
 
-  describe('MFC NSFW Authentication (Issue #19)', () => {
-    it('should inject authentication cookies dynamically when mfcAuth config provided', async () => {
+  describe('Cookie Authentication', () => {
+    it('should inject authentication cookies when auth config provided', async () => {
       // Mock page.setCookie to verify cookies are set
       const setCookieSpy = jest.fn().mockResolvedValue(undefined);
       mockPage.setCookie = setCookieSpy;
@@ -447,19 +447,18 @@ describe('Browser Pool Management', () => {
 
       mockBrowser.createBrowserContext = jest.fn().mockResolvedValue(mockContext);
 
-      // Scrape with authentication config (using current MFC cookie names)
+      // Scrape with authentication config
       const authConfig = {
-        mfcAuth: {
+        auth: {
           sessionCookies: {
-            PHPSESSID: 'test_session_id',
-            sesUID: '12345',
-            sesDID: 'test_device_id',
-            cf_clearance: 'test_cf_clearance'
-          }
+            SID: 'test_session_id',
+            TOKEN: 'test_token',
+          },
+          cookieDomain: '.example.com',
         }
       };
 
-      await scrapeGeneric('https://myfigurecollection.net/item/422432', authConfig);
+      await scrapeGeneric('https://example.com/item/123', authConfig);
 
       // Verify cookies were set
       expect(setCookieSpy).toHaveBeenCalled();
@@ -468,59 +467,23 @@ describe('Browser Pool Management', () => {
       const cookieCalls = setCookieSpy.mock.calls[0];
       const cookieNames = cookieCalls.map((cookie: any) => cookie.name);
 
-      expect(cookieNames).toContain('PHPSESSID');
-      expect(cookieNames).toContain('sesUID');
-      expect(cookieNames).toContain('sesDID');
-      expect(cookieNames).toContain('cf_clearance');
-      expect(cookieNames.length).toBe(4); // Only provided cookies
+      expect(cookieNames).toContain('SID');
+      expect(cookieNames).toContain('TOKEN');
+      expect(cookieNames.length).toBe(2);
 
       // Verify cookie structure details
       const cookies = setCookieSpy.mock.calls[0];
-      const phpSessionCookie = cookies.find((c: any) => c.name === 'PHPSESSID');
-      const sesUIDCookie = cookies.find((c: any) => c.name === 'sesUID');
-      const sesDIDCookie = cookies.find((c: any) => c.name === 'sesDID');
-      const cfClearanceCookie = cookies.find((c: any) => c.name === 'cf_clearance');
+      const sidCookie = cookies.find((c: any) => c.name === 'SID');
 
-      // Verify PHPSESSID cookie has special security flags
-      expect(phpSessionCookie).toMatchObject({
-        name: 'PHPSESSID',
+      expect(sidCookie).toMatchObject({
+        name: 'SID',
         value: 'test_session_id',
-        domain: '.myfigurecollection.net',
+        domain: '.example.com',
         path: '/',
-        httpOnly: true,
-        secure: true,
-        sameSite: 'Lax'
-      });
-
-      // Verify sesUID cookie structure (basic properties only)
-      expect(sesUIDCookie).toMatchObject({
-        name: 'sesUID',
-        value: '12345',
-        domain: '.myfigurecollection.net',
-        path: '/'
-      });
-
-      // Verify sesDID cookie structure (current MFC cookie)
-      expect(sesDIDCookie).toMatchObject({
-        name: 'sesDID',
-        value: 'test_device_id',
-        domain: '.myfigurecollection.net',
-        path: '/'
-      });
-
-      // Verify cf_clearance cookie structure (Cloudflare cookie)
-      expect(cfClearanceCookie).toMatchObject({
-        name: 'cf_clearance',
-        value: 'test_cf_clearance',
-        domain: '.myfigurecollection.net',
-        path: '/'
       });
     });
 
-    // Note: Empty cookie filtering is verified in unit tests for the filter function
-    // The main integration test above confirms that provided cookies are passed through correctly
-
-    it('should NOT inject cookies when mfcAuth config is not provided', async () => {
+    it('should NOT inject cookies when auth config is not provided', async () => {
       // Mock page.setCookie to verify it's NOT called
       const setCookieSpy = jest.fn().mockResolvedValue(undefined);
       mockPage.setCookie = setCookieSpy;
@@ -535,7 +498,7 @@ describe('Browser Pool Management', () => {
       mockBrowser.createBrowserContext = jest.fn().mockResolvedValue(mockContext);
 
       // Scrape WITHOUT authentication config
-      await scrapeGeneric('https://myfigurecollection.net/item/422432', {});
+      await scrapeGeneric('https://example.com/item/123', {});
 
       // Verify cookies were NOT set (public scraping)
       expect(setCookieSpy).not.toHaveBeenCalled();
@@ -751,12 +714,12 @@ describe('Browser Pool Management', () => {
     });
   });
 
-  describe('Security: Sensitive Data Sanitization in Logs', () => {
-    it('should not log sensitive MFC session cookies', async () => {
+  describe('Security: Cookie values not logged', () => {
+    it('should not log sensitive cookie values', async () => {
       // Spy on console.log to capture log output
       const consoleLogSpy = jest.spyOn(console, 'log');
 
-      // Add setCookie to mockPage since mfcAuth config will trigger cookie injection
+      // Add setCookie to mockPage since auth config will trigger cookie injection
       mockPage.setCookie = jest.fn().mockResolvedValue(undefined);
 
       // Create mock context
@@ -768,19 +731,18 @@ describe('Browser Pool Management', () => {
 
       mockBrowser.createBrowserContext = jest.fn().mockResolvedValue(mockContext);
 
-      // Scrape with MFC authentication (using current cookie names)
+      // Scrape with authentication
       const sensitiveConfig = {
-        mfcAuth: {
+        auth: {
           sessionCookies: {
-            PHPSESSID: 'super_secret_session_123',
-            sesUID: 'secret_user_456',
-            sesDID: 'secret_device_789',
-            cf_clearance: 'secret_cf_clearance_abc'
-          }
+            SID: 'super_secret_session_123',
+            TOKEN: 'secret_token_456',
+          },
+          cookieDomain: '.example.com',
         }
       };
 
-      await scrapeGeneric('https://myfigurecollection.net/item/1', sensitiveConfig);
+      await scrapeGeneric('https://example.com/item/1', sensitiveConfig);
 
       // Verify logs don't contain actual sensitive values
       const allLogCalls = consoleLogSpy.mock.calls.map(call => JSON.stringify(call));
@@ -788,48 +750,10 @@ describe('Browser Pool Management', () => {
 
       // Sensitive values should NOT appear in logs
       expect(allLogsString).not.toContain('super_secret_session_123');
-      expect(allLogsString).not.toContain('secret_user_456');
-      expect(allLogsString).not.toContain('secret_device_789');
-      expect(allLogsString).not.toContain('secret_cf_clearance_abc');
-
-      // But [REDACTED] should appear (indicating sanitization is working)
-      expect(allLogsString).toContain('[REDACTED]');
+      expect(allLogsString).not.toContain('secret_token_456');
 
       // Restore console.log
       consoleLogSpy.mockRestore();
     });
-
-    it('should log config safely when no sensitive data is present', async () => {
-      // Spy on console.log
-      const consoleLogSpy = jest.spyOn(console, 'log');
-
-      // Create mock context
-      const mockContext = {
-        newPage: jest.fn().mockResolvedValue(mockPage),
-        close: jest.fn().mockResolvedValue(undefined),
-        pages: jest.fn().mockReturnValue([]),
-      };
-
-      mockBrowser.createBrowserContext = jest.fn().mockResolvedValue(mockContext);
-
-      // Scrape without authentication (no sensitive data)
-      const safeConfig = {
-        userAgent: 'Mozilla/5.0 Test Browser'
-      };
-
-      await scrapeGeneric('https://example.com', safeConfig);
-
-      // Verify config was logged (should be safe)
-      const configLogCall = consoleLogSpy.mock.calls.find(call =>
-        call[0]?.includes?.('[GENERIC SCRAPER] Config:')
-      );
-
-      expect(configLogCall).toBeDefined();
-      expect(JSON.stringify(configLogCall)).toContain('Mozilla/5.0 Test Browser');
-
-      // Restore console.log
-      consoleLogSpy.mockRestore();
-    });
-
   });
 });

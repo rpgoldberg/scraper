@@ -6,7 +6,7 @@
 
 // Mock dependencies
 jest.mock('../../services/genericScraper', () => ({
-  scrapeMFC: jest.fn(),
+  scrapeGeneric: jest.fn(),
   BrowserPool: {
     getStealthBrowser: jest.fn(),
     getBrowser: jest.fn(),

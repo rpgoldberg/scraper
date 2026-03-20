@@ -1,67 +1,57 @@
 import puppeteer, { Browser, Page } from 'puppeteer';
-import { sanitizeForLog, isValidMfcUrl, capWaitTime, truncateString, MAX_STRING_LENGTH } from '../utils/security';
-import { ICompanyEntry, IArtistEntry, extractCompanies, extractArtists, extractMfcFields, extractRelatedItems } from './companyArtistExtractor';
-import { IRelease, extractReleases } from './releaseExtractor';
-import { auditMfcFields, appendFieldAuditLog } from './fieldAuditCollector';
+import { sanitizeForLog, capWaitTime, truncateString, MAX_STRING_LENGTH } from '../utils/security';
 
-// Re-export IRelease for backward compatibility
-export type { IRelease } from './releaseExtractor';
-
+/**
+ * Generic scraped data — plugins may add arbitrary fields via [key: string].
+ * The base engine only extracts what the provided ScrapeConfig selectors describe.
+ */
 export interface ScrapedData {
   imageUrl?: string;
-  manufacturer?: string;  // Legacy: kept for backward compatibility
   name?: string;
-  scale?: string;
-  releases?: IRelease[];
-  // Schema v3: Company and Artist data with roles
-  companies?: ICompanyEntry[];  // Companies with role (Manufacturer, Distributor, etc.)
-  artists?: IArtistEntry[];      // Artists with role (Sculptor, Illustrator, etc.)
-  // Schema v3: Individual MFC fields
-  mfcTitle?: string;        // The figure's specific title/name
-  origin?: string;          // Series/franchise (e.g., "Original", "Fate/Grand Order")
-  version?: string;         // Variant info (e.g., "Little Devil Ver.")
-  category?: string;        // e.g., "Scale Figure"
-  classification?: string;  // e.g., "Goods"
-  materials?: string;       // e.g., "PVC, ABS"
-  dimensions?: string;      // e.g., "1/6, H=260mm"
-  jan?: string;             // JAN/UPC barcode
-  tags?: string[];          // Various tags (e.g., "18+", "Castoff", "Limited")
-  [key: string]: any;       // Allow additional fields
+  [key: string]: any;       // Allow additional fields from plugins
 }
 
-export interface MFCAuthConfig {
-  // Dynamic cookie structure - accepts any cookies the user provides
-  // This allows adapting to MFC cookie name changes without code updates
+/**
+ * Authentication config for cookie-authenticated scraping.
+ * Plugins provide the cookies and domain; the engine just injects them.
+ */
+export interface AuthConfig {
+  /** Cookies to inject (name → value) */
   sessionCookies: Record<string, string>;
+  /** Cookie domain (e.g. ".myfigurecollection.net"). Required for injection. */
+  cookieDomain: string;
+  /** Optional allowlist of cookie names — if provided, only these are injected */
+  allowedCookieNames?: string[];
 }
 
 export interface ScrapeConfig {
+  /** CSS selectors for data extraction — passed directly to page.evaluate */
   imageSelector?: string;
-  manufacturerSelector?: string;
   nameSelector?: string;
-  scaleSelector?: string;
+  /** Arbitrary extra selectors the plugin wants the engine to extract */
+  selectors?: Record<string, string>;
   cloudflareDetection?: {
     titleIncludes?: string[];
     bodyIncludes?: string[];
   };
   waitTime?: number; // milliseconds to wait after page load
   userAgent?: string;
-  mfcAuth?: MFCAuthConfig; // Optional MFC authentication for NSFW content
+  auth?: AuthConfig; // Optional authentication for cookie-gated content
 }
 
 // Enhanced fuzzy string matching for robust Cloudflare detection
 function fuzzyMatchesPattern(text: string, pattern: string, threshold: number = 0.8): boolean {
   if (!text || !pattern) return false;
-  
+
   // Normalize both strings: lowercase, trim, remove extra whitespace
   const normalizedText = text.toLowerCase().trim().replace(/\s+/g, ' ');
   const normalizedPattern = pattern.toLowerCase().trim().replace(/\s+/g, ' ');
-  
+
   // Exact match after normalization
   if (normalizedText.includes(normalizedPattern)) {
     return true;
   }
-  
+
   // Character-level fuzzy matching for typos and variations
   const similarity = calculateSimilarity(normalizedText, normalizedPattern);
   return similarity >= threshold;
@@ -82,7 +72,7 @@ export function calculateSimilarity(str1: string, str2: string): number {
 }
 
 export function getEditDistance(str1: string, str2: string): number {
-  // Truncate strings to prevent O(n²) DoS attacks from unbounded loop iterations
+  // Truncate strings to prevent O(n^2) DoS attacks from unbounded loop iterations
   const s1 = truncateString(str1, MAX_STRING_LENGTH);
   const s2 = truncateString(str2, MAX_STRING_LENGTH);
 
@@ -91,7 +81,7 @@ export function getEditDistance(str1: string, str2: string): number {
   for (let i = 0; i <= s1.length; i++) {
     matrix[0][i] = i;
   }
-  
+
   for (let j = 0; j <= s2.length; j++) {
     matrix[j][0] = j;
   }
@@ -131,8 +121,7 @@ function detectCloudflareChallenge(title: string, bodyText: string, patterns: { 
     'Bitte warten',
     'Espere por favor',
     'Attendere prego',
-    'しばらくお待ちください',
-    // Common variations and typos
+    // Common variations
     'Just a sec',
     'Hold on',
     'Wait a moment',
@@ -184,8 +173,6 @@ function detectCloudflareChallenge(title: string, bodyText: string, patterns: { 
     'Por favor espere',
     'Veuillez patienter',
     'Bitte warten Sie',
-    'お待ちください',
-    '请等待'
   ];
 
   // Check title patterns with fuzzy matching
@@ -205,40 +192,6 @@ function detectCloudflareChallenge(title: string, bodyText: string, patterns: { 
   return false;
 }
 
-// Predefined configurations for common sites
-export const SITE_CONFIGS = {
-  mfc: {
-    imageSelector: '.item-picture .main img',
-    manufacturerSelector: '.data-field .data-label:contains("Company") + .data-value .item-entries a span[switch]',
-    nameSelector: '.data-field .data-label:contains("Title") + .data-value .item-entries a span[switch]',
-    scaleSelector: '.item-scale',
-    cloudflareDetection: {
-      titleIncludes: [
-        'Just a moment',
-        'Please wait',
-        'Checking your browser',
-        'Security check',
-        'Browser verification'
-      ],
-      bodyIncludes: [
-        'Just a moment',
-        'Please wait while we verify',
-        'Checking your browser before accessing',
-        'verify you are a human',
-        'JavaScript required',
-        'DDoS protection',
-        'Performance & security by Cloudflare',
-        'Your browser will redirect automatically'
-      ]
-    },
-    waitTime: 1000,
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
-  },
-  // Future configs for other sites can be added here
-  // hobbylink: { ... },
-  // amiami: { ... }
-};
-
 export class BrowserPool {
   private static browsers: Browser[] = [];
   private static readonly POOL_SIZE = 3; // Keep 3 browsers ready
@@ -251,7 +204,7 @@ export class BrowserPool {
     this.browsers = [];
     this.isInitialized = false;
   }
-  
+
 
   /** Number of browsers currently available in the pool */
   static getPoolSize(): number {
@@ -299,12 +252,12 @@ export class BrowserPool {
 
     return config;
   }
-  
+
   static async initialize(): Promise<void> {
     if (this.isInitialized) return;
-    
+
     console.log(`[BROWSER POOL] Initializing pool with ${this.POOL_SIZE} browsers...`);
-    
+
     for (let i = 0; i < this.POOL_SIZE; i++) {
       try {
         const browser = await puppeteer.launch(this.getBrowserConfig());
@@ -314,11 +267,11 @@ export class BrowserPool {
         console.error(`[BROWSER POOL] Failed to launch browser ${i + 1}:`, error);
       }
     }
-    
+
     this.isInitialized = true;
     console.log(`[BROWSER POOL] Pool initialized with ${this.browsers.length} browsers`);
   }
-  
+
   static async getBrowser(): Promise<Browser> {
     // Ensure pool is initialized
     if (!this.isInitialized) {
@@ -406,12 +359,12 @@ export class BrowserPool {
     }
   }
 
-  // Stealth browser for NSFW content (bypasses Cloudflare bot detection)
+  // Stealth browser for bypassing bot detection (Cloudflare, etc.)
   private static stealthBrowser: Browser | null = null;
 
   static async getStealthBrowser(): Promise<Browser> {
     if (!this.stealthBrowser) {
-      console.log('[BROWSER POOL] Creating stealth browser for NSFW content...');
+      console.log('[BROWSER POOL] Creating stealth browser...');
 
       // In test environment, use regular browser (mocks interfere with puppeteer-extra)
       if (process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID) {
@@ -451,7 +404,7 @@ export class BrowserPool {
 
   static async closeAll(): Promise<void> {
     console.log(`[BROWSER POOL] Closing ${this.browsers.length} browsers...`);
-    
+
     const closePromises = this.browsers.map(async (browser, index) => {
       try {
         // Enhanced checks before closing
@@ -467,24 +420,24 @@ export class BrowserPool {
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         console.error(`[BROWSER POOL] Error closing browser ${index + 1}: ${errorMessage}`);
-        
+
         // Additional error logging for debugging
         if (error instanceof Error) {
           console.error(`[BROWSER POOL] Detailed error stack: ${error.stack}`);
         }
       }
     });
-    
+
     // Use allSettled to ensure all close attempts are made
     const results = await Promise.allSettled(closePromises);
-    
+
     // Log any failed close attempts
     results.forEach((result, index) => {
       if (result.status === 'rejected') {
         console.warn(`[BROWSER POOL] Browser ${index + 1} close attempt failed:`, result.reason);
       }
     });
-    
+
     this.browsers = [];
     this.isInitialized = false;
     console.log('[BROWSER POOL] All browsers close attempts completed');
@@ -543,38 +496,15 @@ export async function initializeBrowserPool(): Promise<void> {
   await BrowserPool.initialize();
 }
 
-// Allowlist of MFC cookie names for security validation
-// MUST be set via MFC_ALLOWED_COOKIES env var (comma-separated)
-// Example: MFC_ALLOWED_COOKIES=PHPSESSID,sesUID,sesDID,cf_clearance
-const ALLOWED_COOKIE_NAMES = process.env.MFC_ALLOWED_COOKIES
-  ? process.env.MFC_ALLOWED_COOKIES.split(',').map(s => s.trim()).filter(s => s.length > 0)
-  : [];
-
 /**
- * Sanitize sensitive data from config before logging
- * Prevents exposure of session cookies and other sensitive information
+ * Generic page scraper.
+ *
+ * Uses the provided ScrapeConfig to navigate to the URL and extract data
+ * using CSS selectors.  Plugins provide site-specific configs; the engine
+ * itself is site-agnostic.
  */
-function sanitizeConfigForLogging(config: ScrapeConfig): any {
-  const sanitized: any = { ...config };
-
-  // Redact MFC authentication cookies
-  if (sanitized.mfcAuth?.sessionCookies) {
-    const redactedCookies: Record<string, string> = {};
-    // Iterate over allowlist (not user input) to prevent property injection
-    for (const allowedName of ALLOWED_COOKIE_NAMES) {
-      if (allowedName in sanitized.mfcAuth.sessionCookies) {
-        redactedCookies[allowedName] = '[REDACTED]';
-      }
-    }
-    sanitized.mfcAuth = { sessionCookies: redactedCookies };
-  }
-
-  return sanitized;
-}
-
 export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<ScrapedData> {
   console.log(`[GENERIC SCRAPER] Starting scrape for: ${sanitizeForLog(url)}`); // lgtm[js/log-injection]
-  console.log('[GENERIC SCRAPER] Config:', sanitizeConfigForLogging(config)); // lgtm[js/log-injection]
 
   const t0 = Date.now();
   let tBrowser = 0, tContext = 0, tCookies = 0, tNavigate = 0, tExtract = 0;
@@ -585,10 +515,10 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
   let isPooledBrowser = false; // Track if browser came from pool (needs to be returned)
 
   try {
-    // Use stealth browser for authenticated NSFW requests (bypasses Cloudflare)
+    // Use stealth browser for authenticated requests (bypasses bot detection)
     // Use regular browser for public content (faster, cleaner)
-    if (config.mfcAuth?.sessionCookies) {
-      console.log('[GENERIC SCRAPER] Using stealth browser for NSFW content');
+    if (config.auth?.sessionCookies) {
+      console.log('[GENERIC SCRAPER] Using stealth browser for authenticated content');
       browser = await BrowserPool.getStealthBrowser();
       isPooledBrowser = false; // Stealth browser is singleton, not pooled
     } else {
@@ -623,51 +553,36 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
       'Upgrade-Insecure-Requests': '1',
     });
 
-    // Inject MFC authentication cookies if provided (for NSFW content access)
-    if (config.mfcAuth?.sessionCookies) {
-      console.log('[GENERIC SCRAPER] Applying MFC authentication for NSFW access');
+    // Inject authentication cookies if provided
+    if (config.auth?.sessionCookies) {
+      console.log('[GENERIC SCRAPER] Applying authentication cookies');
 
-      // Set cookies directly — domain is specified explicitly so no homepage visit needed.
-      // This halves the HTTP request footprint to Cloudflare.
-      const cookies = config.mfcAuth.sessionCookies;
+      const { sessionCookies, cookieDomain, allowedCookieNames } = config.auth;
 
-      // Build cookie array dynamically from whatever cookies the user provides
-      // Filter out undefined/empty values to prevent Puppeteer errors
-      // Validate cookie names against allowlist of known MFC cookies for security
-      const cookieArray = Object.entries(cookies)
+      // Build cookie array, optionally filtering through allowlist
+      const cookieArray = Object.entries(sessionCookies)
         .filter(([name, value]) => {
-          // Only allow known cookie names (prevents injection attacks)
-          if (!ALLOWED_COOKIE_NAMES.includes(name)) {
-            console.log(`[GENERIC SCRAPER] Ignoring unknown cookie: ${sanitizeForLog(name)}`); // lgtm[js/log-injection]
+          if (allowedCookieNames && !allowedCookieNames.includes(name)) {
+            console.log(`[GENERIC SCRAPER] Ignoring cookie not in allowlist: ${sanitizeForLog(name)}`); // lgtm[js/log-injection]
             return false;
           }
           return value != null && value !== '';
         })
-        .map(([name, value]) => {
-          const cookieObj: any = {
-            name,
-            value,
-            domain: '.myfigurecollection.net',
-            path: '/'
-          };
-          // PHPSESSID needs special security flags
-          if (name === 'PHPSESSID') {
-            cookieObj.httpOnly = true;
-            cookieObj.secure = true;
-            cookieObj.sameSite = 'Lax';
-          }
-          return cookieObj;
-        });
+        .map(([name, value]) => ({
+          name,
+          value,
+          domain: cookieDomain,
+          path: '/'
+        }));
 
       if (cookieArray.length === 0) {
-        console.log('[GENERIC SCRAPER] Warning: No valid cookies provided in mfcAuth');
+        console.log('[GENERIC SCRAPER] Warning: No valid cookies provided in auth config');
       } else {
-        // Cookie names are from allowlist, safe to log
-        console.log(`[GENERIC SCRAPER] Setting ${cookieArray.length} cookies: ${cookieArray.map(c => c.name).join(', ')}`);
+        console.log(`[GENERIC SCRAPER] Setting ${cookieArray.length} cookies`);
         await page.setCookie(...cookieArray);
       }
 
-      console.log('[GENERIC SCRAPER] MFC authentication applied successfully');
+      console.log('[GENERIC SCRAPER] Authentication applied successfully');
       tCookies = Date.now() - t0;
     }
 
@@ -678,36 +593,36 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
       waitUntil: 'domcontentloaded',
       timeout: 20000
     });
-    
+
     tNavigate = Date.now() - t0;
     console.log('[GENERIC SCRAPER] Page loaded, waiting for content...');
-    
+
     // Wait for dynamic content (configurable, capped to prevent resource exhaustion)
     const waitTime = capWaitTime(config.waitTime, 1000);
     await new Promise(resolve => setTimeout(resolve, waitTime)); // lgtm[js/resource-exhaustion]
-    
+
     // Check for Cloudflare challenge if configured
     if (config.cloudflareDetection) {
       const pageTitle = await page.title();
       const bodyText = await page.evaluate(() => document.body.innerText);
-      
+
       // Use enhanced detection with fuzzy matching and expanded patterns
       const challengeDetected = detectCloudflareChallenge(pageTitle, bodyText, config.cloudflareDetection);
-      
+
       if (challengeDetected) {
         console.log('[GENERIC SCRAPER] Detected challenge page with enhanced detection, waiting...');
-        
+
         const challengePatterns = ['Just a moment'];
-        
+
         // Wait for the challenge to complete using fuzzy pattern matching
         await page.waitForFunction(
           (patterns: string[]) => {
             const currentBodyText = document.body.innerText.toLowerCase();
             const currentTitle = document.title.toLowerCase();
-            
+
             // Check if challenge pattern no longer exists
-            return !patterns.some(pattern => 
-              currentTitle.includes(pattern.toLowerCase()) || 
+            return !patterns.some(pattern =>
+              currentTitle.includes(pattern.toLowerCase()) ||
               currentBodyText.includes(pattern.toLowerCase())
             );
           },
@@ -716,300 +631,58 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
         ).catch(() => {
           console.log('[GENERIC SCRAPER] Challenge timeout - proceeding anyway');
         });
-        
+
         // Wait less after challenge completion (speed optimization)
         await new Promise(resolve => setTimeout(resolve, 1500));
       }
     }
-    
+
     console.log('[GENERIC SCRAPER] Extracting data...');
 
-    // Check for MFC authentication requirement (NSFW content)
-    const pageTitle = await page.title();
-    const bodyText = await page.evaluate(() => document.body.innerText);
-
-    // Data is sanitized via sanitizeForLog() which removes newlines, ANSI codes, and control chars
-    console.log('[DEBUG] Page title:', sanitizeForLog(pageTitle)); // lgtm[js/log-injection]
-    console.log('[DEBUG] Body text preview:', sanitizeForLog(bodyText.substring(0, 200))); // lgtm[js/log-injection]
-
-    // Detect MFC 404 page (could be truly not found OR NSFW requiring auth)
-    // Use proper URL validation to prevent bypass attacks
-    if (isValidMfcUrl(url) &&
-        (pageTitle.includes('Error') || pageTitle.includes('404')) &&
-        (bodyText.includes('404') || bodyText.includes('Not Found') || bodyText.includes('not found'))) {
-
-      // Provide context-aware error message based on whether auth was provided
-      if (config.mfcAuth) {
-        console.log('[GENERIC SCRAPER] MFC 404 page detected WITH authentication - auth issue or invalid item');
-        throw new Error('MFC_ITEM_NOT_ACCESSIBLE: Item not found despite authentication. This could mean: (1) The item ID is invalid, (2) Your MFC account has insufficient permissions (e.g., SFW-only account trying to access NSFW content), OR (3) Your session cookies have expired or been invalidated. Try refreshing your cookies from your browser.');
-      } else {
-        console.log('[GENERIC SCRAPER] MFC 404 page detected WITHOUT authentication - could be invalid or NSFW');
-        throw new Error('MFC_ITEM_NOT_ACCESSIBLE: Item not found. This could mean: (1) The item ID is invalid, OR (2) This is NSFW content requiring MFC authentication. If you believe this item exists and is NSFW, provide your MFC session cookies via the mfcAuth config parameter to access it. Note: MFC returns a generic 404 for NSFW content when not authenticated.');
-      }
-    }
-
-    // Extract data using page.evaluate
+    // Extract data using page.evaluate with the provided selectors
     const scrapedData = await page.evaluate((selectors) => {
       const data: any = {};
-      const debugInfo: any = { availableFields: [] };
 
       try {
-        // DEBUG: Log all available data fields on the page
-        const allDataFields = Array.from(document.querySelectorAll('.data-field'));
-        allDataFields.forEach(field => {
-          const label = field.querySelector('.data-label');
-          const value = field.querySelector('.data-value');
-          if (label && value) {
-            debugInfo.availableFields.push({
-              label: label.textContent?.trim(),
-              valuePreview: value.textContent?.trim().substring(0, 50)
-            });
-          }
-        });
-        console.log('[DEBUG] Available MFC fields:', JSON.stringify(debugInfo.availableFields, null, 2));
-
         // Extract image
         if (selectors.imageSelector) {
           const imageElement = document.querySelector(selectors.imageSelector) as HTMLImageElement;
           if (imageElement && imageElement.src) {
-            // Upgrade to full-resolution: /upload/items/0/ or /1/ → /upload/items/2/
-            data.imageUrl = imageElement.src.replace(/\/upload\/items\/[01]\//, '/upload/items/2/');
+            data.imageUrl = imageElement.src;
           }
         }
-        
-        // Extract manufacturer (special handling for MFC)
-        if (selectors.manufacturerSelector) {
-          if (selectors.manufacturerSelector.includes(':contains(')) {
-            // Handle MFC-specific Company field
-            const dataFields = Array.from(document.querySelectorAll('.data-field'));
-            for (const field of dataFields) {
-              const label = field.querySelector('.data-label');
-              if (label && label.textContent && label.textContent.trim() === 'Company') {
-                const manufacturerElement = field.querySelector('.item-entries a span[switch]') as HTMLElement;
-                if (manufacturerElement && manufacturerElement.textContent) {
-                  data.manufacturer = manufacturerElement.textContent.trim();
-                  break;
-                }
-              }
-            }
-          } else {
-            const manufacturerElement = document.querySelector(selectors.manufacturerSelector) as HTMLElement;
-            if (manufacturerElement && manufacturerElement.textContent) {
-              data.manufacturer = manufacturerElement.textContent.trim();
-            }
-          }
-        }
-        
-        // Extract name (special handling for MFC)
+
+        // Extract name
         if (selectors.nameSelector) {
-          if (selectors.nameSelector.includes(':contains(')) {
-            // MFC uses different fields depending on origin type:
-            // - Licensed characters: "Character" field
-            // - Original characters: "Title" field
-            const dataFields = Array.from(document.querySelectorAll('.data-field'));
-            console.log('[DEBUG] Looking for name in Character or Title field...');
-            let nameFound = false;
-
-            // Try Character field first (most common for licensed figures)
-            for (const field of dataFields) {
-              const label = field.querySelector('.data-label');
-              if (label && label.textContent && label.textContent.trim() === 'Character') {
-                console.log('[DEBUG] Found Character field');
-                const nameElement = field.querySelector('.item-entries a span[switch]') as HTMLElement;
-                if (nameElement && nameElement.textContent) {
-                  data.name = nameElement.textContent.trim();
-                  console.log('[DEBUG] Extracted name from Character:', data.name);
-                  nameFound = true;
-                  break;
-                }
-              }
-            }
-
-            // Fallback to Title field (for original characters)
-            if (!nameFound) {
-              console.log('[DEBUG] Character field not found, trying Title...');
-              for (const field of dataFields) {
-                const label = field.querySelector('.data-label');
-                if (label && label.textContent && label.textContent.trim() === 'Title') {
-                  console.log('[DEBUG] Found Title field');
-                  const nameElement = field.querySelector('.item-entries a span[switch]') as HTMLElement;
-                  if (nameElement && nameElement.textContent) {
-                    data.name = nameElement.textContent.trim();
-                    console.log('[DEBUG] Extracted name from Title:', data.name);
-                    nameFound = true;
-                    break;
-                  }
-                }
-              }
-            }
-
-            // Last resort: use h1
-            if (!nameFound) {
-              console.log('[DEBUG] Neither Character nor Title found, trying h1...');
-              const h1 = document.querySelector('h1');
-              if (h1 && h1.textContent) {
-                data.name = h1.textContent.trim();
-                console.log('[DEBUG] Used h1 as name:', data.name);
-              }
-            }
-          } else {
-            const nameElement = document.querySelector(selectors.nameSelector) as HTMLElement;
-            if (nameElement && nameElement.textContent) {
-              data.name = nameElement.textContent.trim();
-              console.log('[DEBUG] Extracted name via direct selector:', data.name);
-            }
-          }
-        }
-        
-        // Extract scale
-        if (selectors.scaleSelector) {
-          const scaleElement = document.querySelector(selectors.scaleSelector) as HTMLElement;
-          if (scaleElement && scaleElement.textContent) {
-            // For MFC, extract just the scale part (e.g., "1/7" from the item-scale element)
-            let scaleText = scaleElement.textContent.trim();
-            
-            // If it's an MFC .item-scale element, it might contain extra text
-            // Extract just the scale fraction (e.g., "1/7")
-            const scaleMatch = scaleText.match(/1\/\d+/);
-            if (scaleMatch) {
-              data.scale = scaleMatch[0];
-            } else {
-              data.scale = scaleText;
-            }
-          }
-        }
-        
-        // User's personal rating (only present if user owns the figure)
-        const scoreInput = document.querySelector('input[name="score"]:checked') as HTMLInputElement;
-        if (scoreInput) {
-          const val = parseInt(scoreInput.value, 10);
-          if (!isNaN(val) && val >= 1 && val <= 10) {
-            data.userScore = val;
+          const nameElement = document.querySelector(selectors.nameSelector) as HTMLElement;
+          if (nameElement && nameElement.textContent) {
+            data.name = nameElement.textContent.trim();
           }
         }
 
-        // User's wishability (only present if figure is wished)
-        const wishInput = document.querySelector('input[name="wishability"]:checked') as HTMLInputElement;
-        if (wishInput) {
-          const val = parseInt(wishInput.value, 10);
-          if (!isNaN(val) && val >= 1 && val <= 5) {
-            data.userWishRating = val;
+        // Extract any additional selectors provided by plugin
+        if (selectors.selectors) {
+          for (const [fieldName, selector] of Object.entries(selectors.selectors)) {
+            const element = document.querySelector(selector as string) as HTMLElement;
+            if (element && element.textContent) {
+              data[fieldName] = element.textContent.trim();
+            }
           }
         }
-
-        // Debug: Log what we found
-        console.log('Extracted data:', data);
 
       } catch (extractError) {
         console.error('Error during data extraction:', extractError);
       }
-      
+
       return data;
     }, config);
-    
+
     tExtract = Date.now() - t0;
-    // Extract MFC ID from URL for compact logging
-    const mfcIdMatch = url.match(/\/item\/(\d+)/);
-    const mfcIdTag = mfcIdMatch ? mfcIdMatch[1] : '?';
-    console.log(`[SCRAPE TIMING] MFC ${JSON.stringify(mfcIdTag)}: browser=${tBrowser}ms, ctx=${tContext - tBrowser}ms, cookies=${tCookies ? tCookies - tContext + 'ms' : 'n/a'}, navigate=${tNavigate - (tCookies || tContext)}ms, extract=${tExtract - tNavigate}ms, total=${tExtract}ms`);
+    console.log(`[SCRAPE TIMING] browser=${tBrowser}ms, ctx=${tContext - tBrowser}ms, cookies=${tCookies ? tCookies - tContext + 'ms' : 'n/a'}, navigate=${tNavigate - (tCookies || tContext)}ms, extract=${tExtract - tNavigate}ms, total=${tExtract}ms`);
     console.log('[GENERIC SCRAPER] Extraction completed:', scrapedData);
 
-    // Schema v3: Extract companies and artists with roles from HTML
-    // This runs in Node.js context using cheerio, not in browser
-    try {
-      const pageHtml = await page.content();
-      const companies = extractCompanies(pageHtml);
-      const artists = extractArtists(pageHtml);
-
-      if (companies.length > 0) {
-        scrapedData.companies = companies;
-        console.log('[GENERIC SCRAPER] Extracted companies:', companies);
-
-        // Set legacy manufacturer from first Manufacturer role for backward compatibility
-        if (!scrapedData.manufacturer) {
-          const manufacturer = companies.find(c => c.role === 'Manufacturer');
-          if (manufacturer) {
-            scrapedData.manufacturer = manufacturer.name;
-          }
-        }
-      }
-
-      if (artists.length > 0) {
-        scrapedData.artists = artists;
-        console.log('[GENERIC SCRAPER] Extracted artists:', artists);
-      }
-
-      // Extract releases with JAN barcodes
-      const releases = extractReleases(pageHtml);
-      if (releases.length > 0) {
-        scrapedData.releases = releases;
-        console.log('[GENERIC SCRAPER] Extracted releases:', releases);
-      }
-
-      // Extract individual MFC fields (title, origin, version, etc.)
-      const mfcFields = extractMfcFields(pageHtml);
-      if (mfcFields.title) scrapedData.mfcTitle = mfcFields.title;
-      if (mfcFields.origin) scrapedData.origin = mfcFields.origin;
-      if (mfcFields.version) scrapedData.version = mfcFields.version;
-      if (mfcFields.category) scrapedData.category = mfcFields.category;
-      if (mfcFields.classification) scrapedData.classification = mfcFields.classification;
-      if (mfcFields.materials) scrapedData.materials = mfcFields.materials;
-      if (mfcFields.dimensions) scrapedData.dimensions = mfcFields.dimensions;
-      if (mfcFields.jan) scrapedData.jan = mfcFields.jan;
-      if (mfcFields.tags && mfcFields.tags.length > 0) scrapedData.tags = mfcFields.tags;
-
-      // Community stats from MFC fields
-      if (mfcFields.communityOwnedCount !== undefined || mfcFields.communityOrderedCount !== undefined ||
-          mfcFields.communityWishedCount !== undefined || mfcFields.communityListedCount !== undefined ||
-          mfcFields.communityScore !== undefined) {
-        scrapedData.communityStats = {
-          ownedCount: mfcFields.communityOwnedCount,
-          orderedCount: mfcFields.communityOrderedCount,
-          wishedCount: mfcFields.communityWishedCount,
-          listedInCount: mfcFields.communityListedCount,
-          ...(mfcFields.communityScore !== undefined && { averageScore: mfcFields.communityScore }),
-        };
-      }
-
-      // Related items
-      const relatedItems = extractRelatedItems(pageHtml);
-      if (relatedItems.length > 0) {
-        scrapedData.relatedItems = relatedItems;
-      }
-
-      // Log unknown fields for developer observability
-      if (mfcFields.unknownFields && mfcFields.unknownFields.length > 0) {
-        console.warn('[GENERIC SCRAPER] Unknown MFC field labels:', mfcFields.unknownFields);
-      }
-
-      // Use mfcTitle as the name if we don't have one yet
-      if (!scrapedData.name && mfcFields.title) {
-        scrapedData.name = mfcFields.title;
-      }
-
-      // Optional field audit (enabled via MFC_FIELD_AUDIT=true env var)
-      if (process.env.MFC_FIELD_AUDIT === 'true') {
-        try {
-          const mfcIdMatch = url.match(/\/item\/(\d+)/);
-          const auditMfcId = mfcIdMatch ? parseInt(mfcIdMatch[1], 10) : 0;
-          const auditResult = auditMfcFields(pageHtml, auditMfcId);
-          const jsonlLine = appendFieldAuditLog(auditResult);
-          // Write to stdout as JSONL for capture by external tooling
-          console.log('[FIELD AUDIT]', jsonlLine);
-          if (auditResult.unknownLabels.length > 0) {
-            console.warn('[FIELD AUDIT] Unknown labels:', auditResult.unknownLabels);
-          }
-        } catch (auditError) {
-          console.warn('[FIELD AUDIT] Audit collection failed:', auditError);
-        }
-      }
-    } catch (extractionError) {
-      console.error('[GENERIC SCRAPER] Schema v3 extraction failed:', extractionError);
-      // Don't fail the scrape - just continue without v3 data
-    }
-
     return scrapedData;
-    
+
   } catch (error: any) {
     console.error(`[GENERIC SCRAPER] Error: ${error.message}`);
     // Log more detailed error information
@@ -1019,10 +692,7 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
         Message: ${error.message}
         Stack: ${error.stack}`);
     }
-    // Specific error handling for test scenarios
     // All errors should throw - the queue will handle retries and failure reporting
-    // Previously, non-critical errors returned { error: ... } which was treated as success,
-    // causing empty figures to be created in the database (Issue: sync creating empty entries)
     throw error;
   } finally {
     try {
@@ -1045,57 +715,6 @@ export async function scrapeGeneric(url: string, config: ScrapeConfig): Promise<
     }
 
     // NOTE: Browser is NOT closed here - it stays alive in the pool for reuse
-    // This is the fix for Issue #55 - browser context reuse
-  }
-}
-
-// Convenience function for MFC scraping
-// Strategy: Always use cookies when available to capture user-specific data
-// (collection status, personal notes, NSFW content access)
-export async function scrapeMFC(url: string, mfcAuth?: any): Promise<ScrapedData> {
-  const config: ScrapeConfig = { ...SITE_CONFIGS.mfc };
-
-  // Parse cookies if provided
-  let parsedCookies: Record<string, string> | undefined;
-  if (mfcAuth) {
-    if (typeof mfcAuth === 'string') {
-      try {
-        parsedCookies = JSON.parse(mfcAuth);
-      } catch {
-        throw new Error('Invalid MFC auth cookie format');
-      }
-    } else {
-      parsedCookies = mfcAuth;
-    }
-  }
-
-  // Always use cookies when available (captures user-specific data)
-  if (parsedCookies) {
-    console.log('[MFC SCRAPER] Scraping with authentication (user-specific data enabled)...');
-    const authConfig: ScrapeConfig = {
-      ...config,
-      mfcAuth: { sessionCookies: parsedCookies }
-    };
-
-    try {
-      const result = await scrapeGeneric(url, authConfig);
-      console.log('[MFC SCRAPER] Scrape succeeded with authentication');
-      return result;
-    } catch (error: any) {
-      console.log('[MFC SCRAPER] Scrape failed with authentication:', error.message);
-      throw error;
-    }
-  }
-
-  // Fallback: No cookies provided - use public scraping
-  console.log('[MFC SCRAPER] Scraping without authentication (no cookies provided)...');
-  try {
-    const result = await scrapeGeneric(url, config);
-    console.log('[MFC SCRAPER] Scrape succeeded without authentication');
-    return result;
-  } catch (error: any) {
-    console.log('[MFC SCRAPER] Scrape failed:', error.message);
-    throw error;
   }
 }
 

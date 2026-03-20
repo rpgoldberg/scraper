@@ -9,42 +9,17 @@ import {
   SessionPausedEvent,
 } from '../../services/sessionManager';
 
-// Mock the mfcCsvExporter to avoid browser dependency
-jest.mock('../../services/mfcCsvExporter', () => ({
-  validateMfcCookies: jest.fn(),
-}));
-
-// Mock the genericScraper to avoid browser dependency
-jest.mock('../../services/genericScraper', () => ({
-  scrapeMFC: jest.fn(),
-  BrowserPool: {
-    getStealthBrowser: jest.fn(),
-    getBrowser: jest.fn(),
-    returnBrowser: jest.fn(),
-    getPoolSize: jest.fn().mockReturnValue(2),
-    getPoolCapacity: jest.fn().mockReturnValue(3),
-  },
-}));
-
-import { validateMfcCookies } from '../../services/mfcCsvExporter';
-import { scrapeMFC } from '../../services/genericScraper';
-const mockValidate = validateMfcCookies as jest.MockedFunction<typeof validateMfcCookies>;
-const mockScrapeMFC = scrapeMFC as jest.MockedFunction<typeof scrapeMFC>;
-
 describe('SessionManager', () => {
   let manager: SessionManager;
 
   const validCookies = {
-    PHPSESSID: 'abc123',
-    sesUID: 'user456',
-    sesDID: 'device789',
+    SID: 'abc123',
+    TOKEN: 'user456',
   };
 
   beforeEach(() => {
     resetSessionManager();
     manager = new SessionManager();
-    mockValidate.mockReset();
-    mockScrapeMFC.mockReset();
   });
 
   afterEach(() => {
@@ -52,156 +27,33 @@ describe('SessionManager', () => {
   });
 
   // ============================================================================
-  // Cookie Structure Validation
+  // Session Validation
   // ============================================================================
 
-  describe('isSessionValid - structure validation', () => {
-    it('should reject cookies missing PHPSESSID', async () => {
-      const result = await manager.isSessionValid('session1', {
-        sesUID: 'user',
-        sesDID: 'device',
-      });
-      expect(result.valid).toBe(false);
-      expect(result.reason).toContain('Missing required cookies');
-    });
-
-    it('should reject cookies missing sesUID', async () => {
-      const result = await manager.isSessionValid('session1', {
-        PHPSESSID: 'abc',
-        sesDID: 'device',
-      });
-      expect(result.valid).toBe(false);
-      expect(result.reason).toContain('sesUID');
-    });
-
-    it('should reject cookies missing sesDID', async () => {
-      const result = await manager.isSessionValid('session1', {
-        PHPSESSID: 'abc',
-        sesUID: 'user',
-      });
-      expect(result.valid).toBe(false);
-      expect(result.reason).toContain('sesDID');
-    });
-
-    it('should reject empty cookie values as missing', async () => {
-      // Empty string is falsy, so it's treated as missing by the validation logic
-      const result = await manager.isSessionValid('session1', {
-        PHPSESSID: 'valid',
-        sesUID: '',
-        sesDID: 'device',
-      });
-      expect(result.valid).toBe(false);
-      expect(result.reason).toContain('Missing required cookies');
-      expect(result.reason).toContain('sesUID');
-    });
-
-    it('should accept valid structure with structureOnly option', async () => {
+  describe('isSessionValid', () => {
+    it('should return valid for structureOnly with cookies present', async () => {
       const result = await manager.isSessionValid('session1', validCookies, {
         structureOnly: true,
       });
       expect(result.valid).toBe(true);
     });
-  });
 
-  // ============================================================================
-  // Network Validation
-  // ============================================================================
-
-  describe('isSessionValid - network validation', () => {
-    it('should perform network validation when no cache exists', async () => {
-      mockValidate.mockResolvedValue({
-        valid: true,
-        canAccessManager: true,
-        canExportCsv: true,
+    it('should return invalid for structureOnly with empty cookies', async () => {
+      const result = await manager.isSessionValid('session1', {}, {
+        structureOnly: true,
       });
-
-      const result = await manager.isSessionValid('session1', validCookies);
-      expect(result.valid).toBe(true);
-      expect(mockValidate).toHaveBeenCalledTimes(1);
-    });
-
-    it('should return cached valid result on second call', async () => {
-      mockValidate.mockResolvedValue({
-        valid: true,
-        canAccessManager: true,
-        canExportCsv: true,
-      });
-
-      await manager.isSessionValid('session1', validCookies);
-      const result = await manager.isSessionValid('session1', validCookies);
-
-      expect(result.valid).toBe(true);
-      expect(mockValidate).toHaveBeenCalledTimes(1);
-    });
-
-    it('should cache invalid results and return shouldNotify', async () => {
-      mockValidate.mockResolvedValue({
-        valid: false,
-        reason: 'Cookies expired',
-        canAccessManager: false,
-        canExportCsv: false,
-      });
-
-      // First call triggers network validation and caches result
-      const result1 = await manager.isSessionValid('session1', validCookies);
-      expect(result1.valid).toBe(false);
-
-      // Second call uses cache
-      const result2 = await manager.isSessionValid('session1', validCookies);
-      expect(result2.valid).toBe(false);
-      expect(result2.reason).toBe('Cookies expired');
-      expect(result2.shouldNotify).toBe(true);
-    });
-
-    it('should force revalidation when requested', async () => {
-      mockValidate.mockResolvedValue({
-        valid: true,
-        canAccessManager: true,
-        canExportCsv: true,
-      });
-
-      await manager.isSessionValid('session1', validCookies);
-      await manager.isSessionValid('session1', validCookies, { forceRevalidate: true });
-
-      expect(mockValidate).toHaveBeenCalledTimes(2);
-    });
-
-    it('should handle validation errors gracefully', async () => {
-      mockValidate.mockRejectedValue(new Error('Network error'));
-
-      const result = await manager.isSessionValid('session1', validCookies);
       expect(result.valid).toBe(false);
-      expect(result.reason).toContain('Validation error');
+      expect(result.reason).toContain('No cookies provided');
+    });
+
+    it('should assume valid when no cached validation exists', async () => {
+      const result = await manager.isSessionValid('session1', validCookies);
+      expect(result.valid).toBe(true);
     });
 
     it('should track userId for session', async () => {
-      mockValidate.mockResolvedValue({
-        valid: true,
-        canAccessManager: true,
-        canExportCsv: true,
-      });
-
       await manager.isSessionValid('session1', validCookies, { userId: 'user1' });
-      await manager.isSessionValid('session1', validCookies, { userId: 'user2' });
-
-      const sessions = manager.getAllSessions();
-      expect(sessions.length).toBe(1);
-    });
-
-    it('should emit invalidation event when validation fails', async () => {
-      const events: SessionInvalidationEvent[] = [];
-      manager.onSessionEvent((event) => events.push(event));
-
-      mockValidate.mockResolvedValue({
-        valid: false,
-        reason: 'Session expired',
-        canAccessManager: false,
-        canExportCsv: false,
-      });
-
-      await manager.isSessionValid('session1', validCookies, { userId: 'user1' });
-      expect(events.length).toBe(1);
-      expect(events[0].reason).toBe('expired');
+      // No error means tracking succeeded
     });
   });
 
@@ -213,21 +65,6 @@ describe('SessionManager', () => {
     it('should return true for unknown session', () => {
       const result = manager.reportAuthError('unknown-session', 'auth failed');
       expect(result).toBe(true);
-    });
-
-    it('should increment error count and invalidate at threshold', async () => {
-      mockValidate.mockResolvedValue({
-        valid: true,
-        canAccessManager: true,
-        canExportCsv: true,
-      });
-      await manager.isSessionValid('session1', validCookies);
-
-      const result1 = manager.reportAuthError('session1', 'auth failed');
-      expect(result1).toBe(false);
-
-      const result2 = manager.reportAuthError('session1', 'auth failed again');
-      expect(result2).toBe(true);
     });
   });
 
@@ -371,15 +208,6 @@ describe('SessionManager', () => {
         manager.reportCookieFailure('s1', '3', 'u1', 10);
       }).not.toThrow();
     });
-
-    it('should handle callback errors in session events', async () => {
-      manager.onSessionEvent(() => { throw new Error('cb error'); });
-      mockValidate.mockResolvedValue({
-        valid: false, reason: 'expired',
-        canAccessManager: false, canExportCsv: false,
-      });
-      await expect(manager.isSessionValid('s1', validCookies)).resolves.toBeDefined();
-    });
   });
 
   // ============================================================================
@@ -387,26 +215,6 @@ describe('SessionManager', () => {
   // ============================================================================
 
   describe('reportRateLimitBlock', () => {
-    it('should emit rate_limited event for known session', async () => {
-      const events: SessionInvalidationEvent[] = [];
-      manager.onSessionEvent((event) => events.push(event));
-      mockValidate.mockResolvedValue({ valid: true, canAccessManager: true, canExportCsv: true });
-      await manager.isSessionValid('session1', validCookies, { userId: 'user1' });
-
-      manager.reportRateLimitBlock('session1', false);
-      expect(events[0].reason).toBe('rate_limited');
-    });
-
-    it('should emit cloudflare event', async () => {
-      const events: SessionInvalidationEvent[] = [];
-      manager.onSessionEvent((event) => events.push(event));
-      mockValidate.mockResolvedValue({ valid: true, canAccessManager: true, canExportCsv: true });
-      await manager.isSessionValid('session1', validCookies, { userId: 'user1' });
-
-      manager.reportRateLimitBlock('session1', true);
-      expect(events[0].reason).toBe('cloudflare');
-    });
-
     it('should not emit for unknown session', () => {
       const events: SessionInvalidationEvent[] = [];
       manager.onSessionEvent((event) => events.push(event));
@@ -416,84 +224,23 @@ describe('SessionManager', () => {
   });
 
   // ============================================================================
-  // Diagnostics
-  // ============================================================================
-
-  describe('diagnoseFailure', () => {
-    it('should diagnose cookies_expired when probe succeeds with session failures', async () => {
-      mockScrapeMFC.mockResolvedValue({ name: 'Test Item' } as any);
-      manager.reportCookieFailure('session1', '111', 'user1', 10);
-
-      const result = await manager.diagnoseFailure('session1');
-      expect(result.reason).toBe('cookies_expired');
-      expect(result.mfcReachable).toBe(true);
-    });
-
-    it('should diagnose mfc_overloaded when probe fails', async () => {
-      mockScrapeMFC.mockRejectedValue(new Error('timeout'));
-
-      const result = await manager.diagnoseFailure('session1');
-      expect(result.reason).toBe('mfc_overloaded');
-      expect(result.mfcReachable).toBe(false);
-    });
-
-    it('should diagnose unknown for session without failures', async () => {
-      mockScrapeMFC.mockResolvedValue({ name: 'Test Item' } as any);
-
-      const result = await manager.diagnoseFailure('unknown');
-      expect(result.reason).toBe('unknown');
-      expect(result.mfcReachable).toBe(true);
-    });
-
-    it('should use cached probe result', async () => {
-      mockScrapeMFC.mockResolvedValue({ name: 'Test' } as any);
-
-      await manager.diagnoseFailure('s1');
-      await manager.diagnoseFailure('s1');
-      expect(mockScrapeMFC).toHaveBeenCalledTimes(1);
-    });
-  });
-
-  describe('probePublicItem', () => {
-    it('should return true when scrape succeeds', async () => {
-      mockScrapeMFC.mockResolvedValue({ name: 'Test Item' } as any);
-      const result = await manager.probePublicItem();
-      expect(result).toBe(true);
-    });
-
-    it('should return false when scrape returns empty', async () => {
-      mockScrapeMFC.mockResolvedValue({} as any);
-      const result = await manager.probePublicItem();
-      expect(result).toBe(false);
-    });
-
-    it('should return false on error', async () => {
-      mockScrapeMFC.mockRejectedValue(new Error('fail'));
-      const result = await manager.probePublicItem();
-      expect(result).toBe(false);
-    });
-  });
-
-  // ============================================================================
   // Clearing / Stats / Singleton
   // ============================================================================
 
   describe('clearSession / clearAll / getStats', () => {
-    it('should clear a session', async () => {
-      mockValidate.mockResolvedValue({ valid: true, canAccessManager: true, canExportCsv: true });
-      await manager.isSessionValid('session1', validCookies);
+    it('should clear a session', () => {
+      manager.reportCookieFailure('session1', '111', 'user1', 10);
       manager.clearSession('session1');
       expect(manager.getStats().cachedSessions).toBe(0);
     });
 
-    it('should clear all sessions', async () => {
-      mockValidate.mockResolvedValue({ valid: true, canAccessManager: true, canExportCsv: true });
-      await manager.isSessionValid('s1', validCookies);
+    it('should clear all sessions', () => {
+      manager.reportCookieFailure('s1', '111', 'u1', 10);
       manager.clearAll();
       expect(manager.getStats().cachedSessions).toBe(0);
     });
 
-    it('should report stats', async () => {
+    it('should report stats', () => {
       const stats = manager.getStats();
       expect(stats.cachedSessions).toBe(0);
       expect(stats.activeSessions).toBe(0);

@@ -2,9 +2,19 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import scraperRoutes from './routes/scraper';
-import syncRoutes from './routes/sync';
 import * as packageJson from '../package.json';
 import { scraperDebug } from './utils/logger';
+import { logger } from './utils/logger';
+import { getExtractionRegistry } from './layers/extraction/registry';
+import {
+  loadPlugins,
+  mountPluginRoutes,
+  shutdownPlugins,
+  LoadedPlugin,
+} from './plugin-api/loader';
+import { EngineRuntimeConfig } from './plugin-api/runtime-config';
+import { createEngineServices } from './plugin-api/engine-services';
+import type { PluginContext } from './plugin-api/types';
 
 dotenv.config();
 
@@ -13,6 +23,9 @@ import { initializeBrowserPool, BrowserPool } from './services/genericScraper';
 
 const app = express();
 const PORT = process.env.PORT || 3080;
+
+// Track loaded plugins for health reporting and graceful shutdown
+let loadedPlugins: LoadedPlugin[] = [];
 
 // Middleware
 app.use(cors());
@@ -34,13 +47,18 @@ app.get('/health', (req, res) => {
   res.json(healthResponse());
 });
 
-// Detailed health endpoint with browser pool status (for debugging)
+// Detailed health endpoint with browser pool status and plugins (for debugging)
 app.get('/health/detailed', async (req, res) => {
   try {
     const browserPoolHealth = await BrowserPool.getHealth();
     res.json({
       ...healthResponse(),
       browserPool: browserPoolHealth,
+      plugins: loadedPlugins.map(lp => ({
+        name: lp.plugin.name,
+        version: lp.plugin.version,
+        module: lp.module,
+      })),
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
@@ -64,14 +82,41 @@ app.get('/version', (req, res) => {
 // Scraper routes (no /api prefix for consistency)
 app.use('/', scraperRoutes);
 
-// Sync routes for MFC collection synchronization
-app.use('/sync', syncRoutes);
+// Plugin routes — mounted after existing routes so plugins can add endpoints
+const pluginRouter = express.Router();
+app.use('/', pluginRouter);
 
-// Start server and initialize browser pool
+// Start server, load plugins, and initialize browser pool
 app.listen(PORT, async () => {
   console.log(`[PAGE-SCRAPER] Server running on port ${PORT}`);
   console.log(`[PAGE-SCRAPER] Health check: http://localhost:${PORT}/health`);
-  
+
+  // Discover and load plugins
+  try {
+    const registry = getExtractionRegistry();
+    const runtimeConfig = new EngineRuntimeConfig();
+    const engineServices = createEngineServices();
+    const pluginContext: PluginContext = {
+      logger: {
+        info: (msg, meta) => logger.info(msg, meta),
+        warn: (msg, meta) => logger.warn(msg, meta),
+        error: (msg, meta) => logger.error(msg, meta),
+        debug: (msg, meta) => logger.debug('scraper:plugin', msg, meta),
+      },
+      config: runtimeConfig,
+      services: engineServices,
+    };
+
+    loadedPlugins = await loadPlugins(registry, pluginContext);
+    mountPluginRoutes(loadedPlugins, pluginRouter);
+
+    if (loadedPlugins.length > 0) {
+      console.log(`[PAGE-SCRAPER] ${loadedPlugins.length} plugin(s) loaded`);
+    }
+  } catch (error) {
+    console.error('[PAGE-SCRAPER] Plugin loading failed:', error);
+  }
+
   // Initialize browser pool in background
   console.log('[PAGE-SCRAPER] Initializing browser pool...');
   try {
@@ -82,9 +127,35 @@ app.listen(PORT, async () => {
   }
 });
 
-// Graceful shutdown - properly close browser pool to prevent file descriptor leaks
+// Graceful shutdown - close plugins, queue, redis, and browser pool to prevent leaks
 async function gracefulShutdown(signal: string): Promise<void> {
   console.log(`[PAGE-SCRAPER] Received ${signal}, shutting down gracefully...`);
+
+  // Shut down plugins first
+  try {
+    await shutdownPlugins(loadedPlugins);
+  } catch (error) {
+    console.error('[PAGE-SCRAPER] Error shutting down plugins:', error);
+  }
+
+  // Stop scrape queue (closes BullMQ worker + queue in production mode)
+  try {
+    const { getScrapeQueue } = require('./services/scrapeQueue');
+    const queue = getScrapeQueue();
+    queue.stop();
+    console.log('[PAGE-SCRAPER] Scrape queue stopped');
+  } catch (error) {
+    console.error('[PAGE-SCRAPER] Error stopping scrape queue:', error);
+  }
+
+  // Close Redis connection
+  try {
+    const { closeRedisConnection } = require('./infrastructure/redis');
+    await closeRedisConnection();
+    console.log('[PAGE-SCRAPER] Redis connection closed');
+  } catch (error) {
+    console.error('[PAGE-SCRAPER] Error closing Redis connection:', error);
+  }
 
   try {
     console.log('[PAGE-SCRAPER] Closing browser pool...');

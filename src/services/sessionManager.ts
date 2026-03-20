@@ -1,21 +1,19 @@
 /**
  * Session Manager Service
  *
- * Manages MFC cookie session validation with caching to avoid
- * making network requests on every queue item. Sessions are
- * validated periodically and cached results are used for subsequent
- * requests until they expire or are invalidated.
- *
- * Design Rationale:
- * - Full cookie validation (validateMfcCookies) makes network requests
- * - We can't do that for every queue item - too slow and rate-limit risky
- * - Instead, we cache validation results per sessionId
- * - Invalidate cache on auth errors from scraping
- * - Re-validate when cache expires (default: 10 minutes)
+ * Manages cookie session tracking with failure counting, pause/resume,
+ * and cooldown logic. Site-specific cookie validation is provided by
+ * plugins; the session manager itself is site-agnostic.
  */
 
-import { validateMfcCookies, MfcCookies, CookieValidationResult } from './mfcCsvExporter';
 import { sanitizeForLog } from '../utils/security';
+
+/** Generic cookie validation result (plugins provide site-specific validation) */
+export interface CookieValidationResult {
+  valid: boolean;
+  reason?: string;
+  [key: string]: any;
+}
 
 // ============================================================================
 // Types and Interfaces
@@ -97,34 +95,13 @@ const SESSION_CONFIG = {
 
   /** Maximum sessions to cache */
   MAX_CACHED_SESSIONS: 100,
-
-  /** Known public MFC item ID for connectivity probing (SFW) */
-  PROBE_MFC_ID: '50', // Item #50 is a known good SFW item
-
-  /** How long to cache probe results (ms) */
-  PROBE_CACHE_TTL: 60 * 1000, // 1 minute
 } as const;
 
 // ============================================================================
 // Failure Classification
 // ============================================================================
 
-export type FailureReason = 'cookies_expired' | 'mfc_overloaded' | 'network_error' | 'unknown';
-
-export interface DiagnosticResult {
-  /** What we think caused the failure */
-  reason: FailureReason;
-  /** Confidence level 0-1 */
-  confidence: number;
-  /** Human-readable explanation */
-  explanation: string;
-  /** Whether MFC is reachable at all */
-  mfcReachable: boolean;
-  /** Last probe result */
-  lastProbeSuccess?: boolean;
-  /** Time of last probe */
-  lastProbeTime?: number;
-}
+export type FailureReason = 'cookies_expired' | 'site_overloaded' | 'network_error' | 'unknown';
 
 // ============================================================================
 // Session Manager Class
@@ -134,12 +111,6 @@ export class SessionManager {
   private sessions: Map<string, CachedSession> = new Map();
   private eventCallbacks: SessionEventCallback[] = [];
   private pausedCallbacks: SessionPausedCallback[] = [];
-  private validationLocks: Map<string, Promise<CookieValidationResult>> = new Map();
-
-  // MFC connectivity probe state
-  private lastProbeTime: number = 0;
-  private lastProbeSuccess: boolean = false;
-  private probeInProgress: Promise<boolean> | null = null;
 
   constructor() {
     console.log('[SESSION MANAGER] Initialized');
@@ -150,34 +121,31 @@ export class SessionManager {
   // ==========================================================================
 
   /**
-   * Check if a session is likely valid for making cookie-authenticated requests
+   * Check if a session is likely valid for making cookie-authenticated requests.
    *
-   * This uses cached results when available to avoid network requests.
-   * Use forceRevalidate: true to force a fresh network check.
+   * Uses cached validation results. Plugins can call reportAuthError() or
+   * reportCookieFailure() to invalidate sessions when scraping detects auth issues.
    */
   async isSessionValid(
     sessionId: string,
     cookies: Record<string, string>,
     options: SessionValidationOptions = {}
   ): Promise<{ valid: boolean; reason?: string; shouldNotify?: boolean }> {
-    const { forceRevalidate = false, structureOnly = false, userId } = options;
+    const { structureOnly = false, userId } = options;
 
-    // Quick structure check
-    const structureResult = this.validateCookieStructure(cookies);
-    if (!structureResult.valid) {
-      return { valid: false, reason: structureResult.reason };
-    }
-
-    // If only structure check requested, we're done
+    // If only structure check requested, just verify cookies are non-empty
     if (structureOnly) {
-      return { valid: true };
+      const hasAnyCookies = Object.keys(cookies).length > 0;
+      return hasAnyCookies
+        ? { valid: true }
+        : { valid: false, reason: 'No cookies provided' };
     }
 
     // Check cached session
     const cached = this.sessions.get(sessionId);
     const now = Date.now();
 
-    if (cached && !forceRevalidate) {
+    if (cached) {
       // Add user to session tracking
       if (userId && !cached.userIds.includes(userId)) {
         cached.userIds.push(userId);
@@ -189,7 +157,6 @@ export class SessionManager {
       const notTooManyErrors = cached.authErrorCount < SESSION_CONFIG.AUTH_ERROR_THRESHOLD;
 
       if (cacheValid && notTooManyErrors) {
-        // Use cached result
         if (cached.lastResult.valid) {
           console.log(`[SESSION MANAGER] Session ${sanitizeForLog(sessionId.substring(0, 8))}... cache hit (valid)`);
           return { valid: true };
@@ -202,13 +169,11 @@ export class SessionManager {
           };
         }
       }
-
-      // Cache expired or too many errors, need revalidation
-      console.log(`[SESSION MANAGER] Session ${sanitizeForLog(sessionId.substring(0, 8))}... cache miss (age: ${Math.round(cacheAge / 1000)}s, errors: ${cached.authErrorCount})`);
     }
 
-    // Need to validate - use lock to prevent parallel validation for same session
-    return this.performValidation(sessionId, cookies, userId);
+    // No cached validation — assume valid (plugins will report failures)
+    console.log(`[SESSION MANAGER] Session ${sanitizeForLog(sessionId.substring(0, 8))}... no cached validation, assuming valid`);
+    return { valid: true };
   }
 
   /**
@@ -444,107 +409,6 @@ export class SessionManager {
   }
 
   /**
-   * Diagnose why cookie-authenticated requests are failing.
-   * Probes MFC with a known public item to determine if it's:
-   * - Cookie expiration (public works, auth fails)
-   * - MFC overload (public also fails)
-   * - Network issues (can't reach MFC at all)
-   */
-  async diagnoseFailure(sessionId: string): Promise<DiagnosticResult> {
-    const cached = this.sessions.get(sessionId);
-    const now = Date.now();
-
-    // Check if we have a recent probe result
-    if (now - this.lastProbeTime < SESSION_CONFIG.PROBE_CACHE_TTL) {
-      return this.buildDiagnostic(cached, this.lastProbeSuccess);
-    }
-
-    // Perform a fresh probe
-    const probeSuccess = await this.probePublicItem();
-
-    return this.buildDiagnostic(cached, probeSuccess);
-  }
-
-  /**
-   * Probe MFC with a known public item (no auth required)
-   * This helps distinguish between MFC overload and cookie expiration
-   */
-  async probePublicItem(): Promise<boolean> {
-    // Use existing probe if in progress
-    if (this.probeInProgress) {
-      return this.probeInProgress;
-    }
-
-    this.probeInProgress = this.doProbe();
-
-    try {
-      const result = await this.probeInProgress;
-      this.lastProbeTime = Date.now();
-      this.lastProbeSuccess = result;
-      return result;
-    } finally {
-      this.probeInProgress = null;
-    }
-  }
-
-  private async doProbe(): Promise<boolean> {
-    console.log('[SESSION MANAGER] Probing MFC with public item...');
-
-    try {
-      // Dynamic import to avoid circular dependency
-      const { scrapeMFC } = await import('./genericScraper');
-
-      const url = `https://myfigurecollection.net/item/${SESSION_CONFIG.PROBE_MFC_ID}`;
-      const result = await scrapeMFC(url);
-
-      // Check if we got valid data back
-      const success = Boolean(result && result.name && result.name.length > 0);
-      console.log(`[SESSION MANAGER] Probe result: ${success ? 'SUCCESS' : 'FAILED'}`);
-
-      return success;
-    } catch (error: any) {
-      console.log(`[SESSION MANAGER] Probe failed: ${error.message}`);
-      return false;
-    }
-  }
-
-  private buildDiagnostic(cached: CachedSession | undefined, probeSuccess: boolean): DiagnosticResult {
-    if (!probeSuccess) {
-      // Public item also fails - MFC is having issues
-      return {
-        reason: 'mfc_overloaded',
-        confidence: 0.85,
-        explanation: 'MFC appears to be overloaded or experiencing issues. Public items are also inaccessible.',
-        mfcReachable: false,
-        lastProbeSuccess: false,
-        lastProbeTime: this.lastProbeTime,
-      };
-    }
-
-    // Public item works but we're seeing auth failures
-    if (cached && cached.consecutiveFailures > 0) {
-      return {
-        reason: 'cookies_expired',
-        confidence: 0.9,
-        explanation: 'MFC is reachable but authenticated requests are failing. Your session cookies have likely expired.',
-        mfcReachable: true,
-        lastProbeSuccess: true,
-        lastProbeTime: this.lastProbeTime,
-      };
-    }
-
-    // No failures tracked - could be intermittent
-    return {
-      reason: 'unknown',
-      confidence: 0.5,
-      explanation: 'MFC is reachable. The failure may have been intermittent.',
-      mfcReachable: true,
-      lastProbeSuccess: true,
-      lastProbeTime: this.lastProbeTime,
-    };
-  }
-
-  /**
    * Report a rate limit or Cloudflare block for a session
    *
    * This is informational and may be used to pause processing.
@@ -578,7 +442,6 @@ export class SessionManager {
    */
   clearAll(): void {
     this.sessions.clear();
-    this.validationLocks.clear();
     console.log('[SESSION MANAGER] Cleared all sessions');
   }
 
@@ -620,102 +483,6 @@ export class SessionManager {
   // Private Methods
   // ==========================================================================
 
-  private validateCookieStructure(cookies: Record<string, string>): { valid: boolean; reason?: string } {
-    const required = ['PHPSESSID', 'sesUID', 'sesDID'];
-    const missing = required.filter(name => !cookies[name]);
-
-    if (missing.length > 0) {
-      return {
-        valid: false,
-        reason: `Missing required cookies: ${missing.join(', ')}`
-      };
-    }
-
-    // Check for empty values
-    const empty = required.filter(name => cookies[name] === '');
-    if (empty.length > 0) {
-      return {
-        valid: false,
-        reason: `Empty cookie values: ${empty.join(', ')}`
-      };
-    }
-
-    return { valid: true };
-  }
-
-  private async performValidation(
-    sessionId: string,
-    cookies: Record<string, string>,
-    userId?: string
-  ): Promise<{ valid: boolean; reason?: string; shouldNotify?: boolean }> {
-    // Check if validation already in progress for this session
-    const existingLock = this.validationLocks.get(sessionId);
-    if (existingLock) {
-      console.log(`[SESSION MANAGER] Waiting for in-progress validation of session ${sanitizeForLog(sessionId.substring(0, 8))}...`);
-      const result = await existingLock;
-      return { valid: result.valid, reason: result.reason };
-    }
-
-    // Create validation promise
-    const validationPromise = this.doNetworkValidation(sessionId, cookies, userId);
-    this.validationLocks.set(sessionId, validationPromise);
-
-    try {
-      const result = await validationPromise;
-      return {
-        valid: result.valid,
-        reason: result.reason,
-        shouldNotify: !result.valid
-      };
-    } finally {
-      this.validationLocks.delete(sessionId);
-    }
-  }
-
-  private async doNetworkValidation(
-    sessionId: string,
-    cookies: Record<string, string>,
-    userId?: string
-  ): Promise<CookieValidationResult> {
-    console.log(`[SESSION MANAGER] Performing network validation for session ${sanitizeForLog(sessionId.substring(0, 8))}...`);
-
-    try {
-      // Convert to MfcCookies format
-      const mfcCookies: MfcCookies = {
-        PHPSESSID: cookies.PHPSESSID || '',
-        sesUID: cookies.sesUID || '',
-        sesDID: cookies.sesDID || '',
-        cf_clearance: cookies.cf_clearance,
-      };
-
-      const result = await validateMfcCookies(mfcCookies);
-
-      // Cache the result
-      this.cacheSession(sessionId, result, cookies, userId);
-
-      if (!result.valid) {
-        // Emit invalidation event
-        this.invalidateSession(sessionId, 'expired', result.reason);
-      }
-
-      return result;
-
-    } catch (error: any) {
-      console.error(`[SESSION MANAGER] Validation error for session ${sanitizeForLog(sessionId.substring(0, 8))}...:`, error.message);
-
-      const failureResult: CookieValidationResult = {
-        valid: false,
-        reason: `Validation error: ${error.message}`,
-        canAccessManager: false,
-        canExportCsv: false,
-      };
-
-      // Cache the failure
-      this.cacheSession(sessionId, failureResult, cookies, userId);
-
-      return failureResult;
-    }
-  }
 
   private cacheSession(
     sessionId: string,
@@ -761,8 +528,6 @@ export class SessionManager {
       lastResult: {
         valid: false,
         reason: 'Not yet validated',
-        canAccessManager: false,
-        canExportCsv: false,
       },
       cookiesSnapshot: '',
       authErrorCount: 0,
