@@ -28,6 +28,7 @@ export interface ExtractionRuleset {
   siteId: string;
   version: string;
   extract(html: string, url: string): ExtractedData;
+  extractAsync?(html: string, url: string): Promise<ExtractedData>;
   validate(data: ExtractedData): ValidationResult;
 }
 
@@ -42,6 +43,15 @@ export interface ExtractedData {
   };
   fields: Record<string, unknown>;
   warnings: string[];
+  /** Metadata from LLM-powered extraction (present only for LLM rulesets). */
+  llmMetadata?: {
+    confidence: number;
+    model: string;
+    inputTokens: number;
+    outputTokens: number;
+    latencyMs: number;
+    cached: boolean;
+  };
 }
 
 /** Result of validating an ExtractedData payload. */

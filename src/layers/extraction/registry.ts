@@ -14,6 +14,8 @@ export class ExtractionRegistry {
   private siteConfigs: Map<string, SiteConfig> = new Map();
   /** Maps each domain to its owning siteId for fast lookup. */
   private domainIndex: Map<string, string> = new Map();
+  /** Fallback ruleset used when no site-specific ruleset matches. */
+  private fallbackRuleset: ExtractionRuleset | undefined;
 
   /**
    * Register a site configuration.  Also indexes all of its domains
@@ -72,6 +74,19 @@ export class ExtractionRegistry {
   /** List all registered site configs. */
   listSites(): SiteConfig[] {
     return Array.from(this.siteConfigs.values());
+  }
+
+  /**
+   * Register a fallback ruleset used when no site-specific ruleset matches.
+   * Typically the LLM-powered extraction ruleset.
+   */
+  registerFallback(ruleset: ExtractionRuleset): void {
+    this.fallbackRuleset = ruleset;
+  }
+
+  /** Get the registered fallback ruleset, if any. */
+  getFallback(): ExtractionRuleset | undefined {
+    return this.fallbackRuleset;
   }
 }
 

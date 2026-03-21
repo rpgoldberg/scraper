@@ -18,6 +18,7 @@ import type { PluginContext } from './plugin-api/types';
 import { serviceAuth } from './middleware/serviceAuth';
 import { startGrpcServer, stopGrpcServer } from './grpc/server';
 import type * as grpc from '@grpc/grpc-js';
+import { LlmExtractionRuleset, ExtractionCache, DEFAULT_LLM_CONFIG } from './layers/extraction/llm';
 
 dotenv.config();
 
@@ -149,6 +150,34 @@ app.listen(PORT, async () => {
 
     if (loadedPlugins.length > 0) {
       console.log(`[PAGE-SCRAPER] ${loadedPlugins.length} plugin(s) loaded`);
+    }
+
+    // Register LLM fallback extraction if API key is configured
+    if (process.env.ANTHROPIC_API_KEY) {
+      try {
+        const llmConfig = {
+          ...DEFAULT_LLM_CONFIG,
+          apiKey: process.env.ANTHROPIC_API_KEY,
+        };
+
+        // Use Redis for caching if available, otherwise cache degrades gracefully
+        let redisLike = null;
+        try {
+          const { getRedisConnection } = require('./infrastructure/redis');
+          redisLike = getRedisConnection();
+        } catch {
+          // Redis not available, cache will be disabled
+        }
+
+        const cache = new ExtractionCache(redisLike, {
+          ttlSeconds: llmConfig.cacheTtlSeconds,
+        });
+        const llmRuleset = new LlmExtractionRuleset(llmConfig, cache);
+        registry.registerFallback(llmRuleset);
+        logger.info('LLM fallback extraction registered');
+      } catch (error) {
+        console.error('[PAGE-SCRAPER] Failed to initialize LLM extraction:', error);
+      }
     }
   } catch (error) {
     console.error('[PAGE-SCRAPER] Plugin loading failed:', error);
