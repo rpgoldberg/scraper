@@ -16,6 +16,8 @@ import { EngineRuntimeConfig } from './plugin-api/runtime-config';
 import { createEngineServices } from './plugin-api/engine-services';
 import type { PluginContext } from './plugin-api/types';
 import { serviceAuth } from './middleware/serviceAuth';
+import { startGrpcServer, stopGrpcServer } from './grpc/server';
+import type * as grpc from '@grpc/grpc-js';
 
 dotenv.config();
 
@@ -27,6 +29,9 @@ const PORT = process.env.PORT || 3080;
 
 // Track loaded plugins for health reporting and graceful shutdown
 let loadedPlugins: LoadedPlugin[] = [];
+
+// Track gRPC server for graceful shutdown
+let grpcServer: grpc.Server | undefined;
 
 // Middleware
 // Scraper is an internal service — restrict CORS to backend origin only
@@ -157,13 +162,29 @@ app.listen(PORT, async () => {
   } catch (error) {
     console.error('[PAGE-SCRAPER] Failed to initialize browser pool:', error);
   }
+
+  // Start gRPC server alongside Express
+  try {
+    grpcServer = startGrpcServer();
+  } catch (error) {
+    console.error('[PAGE-SCRAPER] Failed to start gRPC server:', error);
+  }
 });
 
 // Graceful shutdown - close plugins, queue, redis, and browser pool to prevent leaks
 async function gracefulShutdown(signal: string): Promise<void> {
   console.log(`[PAGE-SCRAPER] Received ${signal}, shutting down gracefully...`);
 
-  // Shut down plugins first
+  // Shut down gRPC server first (drain in-flight RPCs)
+  if (grpcServer) {
+    try {
+      await stopGrpcServer(grpcServer);
+    } catch (error) {
+      console.error('[PAGE-SCRAPER] Error stopping gRPC server:', error);
+    }
+  }
+
+  // Shut down plugins
   try {
     await shutdownPlugins(loadedPlugins);
   } catch (error) {
