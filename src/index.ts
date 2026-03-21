@@ -17,6 +17,7 @@ import { createEngineServices } from './plugin-api/engine-services';
 import type { PluginContext } from './plugin-api/types';
 import { serviceAuth } from './middleware/serviceAuth';
 import { startGrpcServer, stopGrpcServer } from './grpc/server';
+import { setGrpcEngineServices } from './grpc/services';
 import type * as grpc from '@grpc/grpc-js';
 import { LlmExtractionRuleset, ExtractionCache, DEFAULT_LLM_CONFIG } from './layers/extraction/llm';
 
@@ -134,6 +135,7 @@ app.listen(PORT, async () => {
     const registry = getExtractionRegistry();
     const runtimeConfig = new EngineRuntimeConfig();
     const engineServices = createEngineServices();
+    setGrpcEngineServices(engineServices);
     const pluginContext: PluginContext = {
       logger: {
         info: (msg, meta) => logger.info(msg, meta),
