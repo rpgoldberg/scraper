@@ -11,6 +11,8 @@ import type {
   SyncFromCsvRequest,
 } from '../generated/figure_collector/v1/messages';
 import { getGrpcEngineServices } from '../services';
+import { GrpcStreamNotifier } from '../stream-notifier';
+import { registerStreamForSession, unregisterStream } from '../webhook-bridge';
 
 /**
  * ValidateCookies — validate session cookies are still active.
@@ -211,16 +213,206 @@ function grpcError(code: grpc.status, message: string): Error & { code: grpc.sta
 
 /**
  * ExecuteFullSync — server-streaming RPC that replaces webhook callbacks.
- * STUB: immediately ends with UNIMPLEMENTED — Phase 3 migration.
+ *
+ * Creates a GrpcStreamNotifier for the session and registers it with the
+ * webhook bridge. All webhook calls from the queue worker for this session
+ * are transparently routed to the gRPC stream instead of HTTP.
+ *
+ * The stream stays open until the sync completes, an unrecoverable error
+ * occurs, or the client cancels.
  */
 export const executeFullSync: handleServerStreamingCall<FullSyncRequest, SyncEvent> = (call) => {
-  call.destroy(grpcError(grpc.status.UNIMPLEMENTED, 'ExecuteFullSync not yet implemented'));
+  const { cookies, userId, sessionId, profileUrl } = call.request;
+
+  // Validate required fields
+  if (!cookies || Object.keys(cookies).length === 0) {
+    call.destroy(grpcError(grpc.status.INVALID_ARGUMENT, 'Cookies are required'));
+    return;
+  }
+  if (!sessionId) {
+    call.destroy(grpcError(grpc.status.INVALID_ARGUMENT, 'Session ID is required'));
+    return;
+  }
+
+  const services = getGrpcEngineServices();
+  if (!services) {
+    call.destroy(grpcError(grpc.status.UNAVAILABLE, 'Engine services not initialized'));
+    return;
+  }
+
+  const notifier = new GrpcStreamNotifier(call, sessionId);
+
+  // Register the stream so webhook calls for this session are routed here
+  registerStreamForSession(sessionId, notifier);
+
+  // Cleanup helper: unregister stream and mark notifier as ended
+  const cleanup = () => {
+    notifier.end();
+    unregisterStream(sessionId);
+  };
+
+  // Listen for client cancellation
+  call.on('cancelled', () => {
+    cleanup();
+    services.queue.cancelAllForSession(sessionId);
+  });
+
+  // Execute the sync workflow asynchronously
+  (async () => {
+    try {
+      // Phase: validating cookies
+      notifier.notifyPhaseChange('validating', 'Validating session cookies');
+
+      const validationResult = await services.sessions.isSessionValid(sessionId, cookies, {
+        userId: userId || undefined,
+      });
+
+      if (!validationResult.valid) {
+        notifier.notifyError(
+          'INVALID_COOKIES',
+          validationResult.reason || 'Cookie validation failed',
+          false,
+        );
+        cleanup();
+        call.end();
+        return;
+      }
+
+      notifier.notifyPhaseChange('validated', 'Session cookies validated');
+
+      // Register webhook config so the webhook adapter can find the stream
+      // (the bridge intercepts before HTTP delivery)
+      services.webhooks.registerWebhookConfig({
+        webhookUrl: '', // No HTTP URL needed — bridge intercepts
+        webhookSecret: '', // No signing needed — same process
+        sessionId,
+      });
+
+      // Signal that the gRPC stream is ready and the sync workflow can proceed.
+      // The actual sync execution (CSV export, parse, queue) is driven by the
+      // MFC plugin through the engine's REST routes or a programmatic API.
+      // Events from the queue worker flow through the webhook bridge into this
+      // stream automatically.
+      notifier.notifyPhaseChange('ready', 'gRPC stream active — awaiting sync workflow');
+
+      // The stream stays open. Events are written by the webhook bridge when
+      // the queue worker completes items. The stream is closed when:
+      // 1. The plugin sends a 'completed' phase (handled by the bridge)
+      // 2. The client cancels (handled by the 'cancelled' listener above)
+      // 3. An unrecoverable error occurs
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error during sync setup';
+      notifier.notifyError('INTERNAL', message, true);
+      cleanup();
+      call.end();
+    }
+  })();
 };
 
 /**
  * SyncFromCsv — server-streaming RPC for CSV-based sync.
- * STUB: immediately ends with UNIMPLEMENTED — Phase 3 migration.
+ *
+ * Accepts pre-parsed CSV items and initiates a sync. Events stream back
+ * as items are processed by the queue worker.
  */
 export const syncFromCsv: handleServerStreamingCall<SyncFromCsvRequest, SyncEvent> = (call) => {
-  call.destroy(grpcError(grpc.status.UNIMPLEMENTED, 'SyncFromCsv not yet implemented'));
+  const { cookies, userId, sessionId, items } = call.request;
+
+  // Validate required fields
+  if (!cookies || Object.keys(cookies).length === 0) {
+    call.destroy(grpcError(grpc.status.INVALID_ARGUMENT, 'Cookies are required'));
+    return;
+  }
+  if (!sessionId) {
+    call.destroy(grpcError(grpc.status.INVALID_ARGUMENT, 'Session ID is required'));
+    return;
+  }
+  if (!items || items.length === 0) {
+    call.destroy(grpcError(grpc.status.INVALID_ARGUMENT, 'At least one CSV item is required'));
+    return;
+  }
+
+  const services = getGrpcEngineServices();
+  if (!services) {
+    call.destroy(grpcError(grpc.status.UNAVAILABLE, 'Engine services not initialized'));
+    return;
+  }
+
+  const notifier = new GrpcStreamNotifier(call, sessionId);
+
+  // Register the stream so webhook calls for this session are routed here
+  registerStreamForSession(sessionId, notifier);
+
+  const cleanup = () => {
+    notifier.end();
+    unregisterStream(sessionId);
+  };
+
+  // Listen for client cancellation
+  call.on('cancelled', () => {
+    cleanup();
+    services.queue.cancelAllForSession(sessionId);
+  });
+
+  (async () => {
+    try {
+      // Phase: validating
+      notifier.notifyPhaseChange('validating', 'Validating session cookies');
+
+      const validationResult = await services.sessions.isSessionValid(sessionId, cookies, {
+        userId: userId || undefined,
+      });
+
+      if (!validationResult.valid) {
+        notifier.notifyError(
+          'INVALID_COOKIES',
+          validationResult.reason || 'Cookie validation failed',
+          false,
+        );
+        cleanup();
+        call.end();
+        return;
+      }
+
+      notifier.notifyPhaseChange('validated', 'Session cookies validated');
+
+      // Register webhook config for bridge interception
+      services.webhooks.registerWebhookConfig({
+        webhookUrl: '',
+        webhookSecret: '',
+        sessionId,
+      });
+
+      // Phase: queueing — send discovered items and enqueue them
+      notifier.notifyPhaseChange(
+        'queueing',
+        `Queueing ${items.length} items for scraping`,
+        items.map((item) => ({
+          mfcId: item.mfcId,
+          name: item.name,
+          collectionStatus: item.collectionStatus,
+        })),
+      );
+
+      // Enqueue all items for scraping
+      const bulkItems = items.map((item) => ({
+        mfcId: item.mfcId,
+        cookies,
+        sessionId,
+        userId: userId || undefined,
+        status: (item.collectionStatus as 'owned' | 'ordered' | 'wished') || undefined,
+      }));
+
+      services.queue.enqueueBulk(bulkItems);
+
+      notifier.notifyPhaseChange('enriching', `Processing ${items.length} items`);
+
+      // Stream stays open — events flow through the webhook bridge
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error during CSV sync setup';
+      notifier.notifyError('INTERNAL', message, true);
+      cleanup();
+      call.end();
+    }
+  })();
 };

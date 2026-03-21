@@ -26,6 +26,7 @@ import type { ScrapeConfig } from '../services/genericScraper';
 import { getScrapeQueue } from '../services/scrapeQueue';
 import { getSessionManager } from '../services/sessionManager';
 import * as webhookClient from '../services/webhookClient';
+import { getStreamForSession } from '../grpc/webhook-bridge';
 
 // ============================================================================
 // Public factory
@@ -267,14 +268,30 @@ function createWebhookService(): WebhookService {
       mfcId: string,
       scrapedData?: Record<string, unknown>,
     ): Promise<boolean> {
+      // Check for active gRPC stream — route there instead of HTTP
+      const stream = getStreamForSession(sessionId);
+      if (stream) {
+        stream.notifyItemComplete(mfcId, scrapedData);
+        return true;
+      }
       return webhookClient.notifyItemSuccess(sessionId, mfcId, scrapedData);
     },
 
     async notifyItemFailed(sessionId: string, mfcId: string, error: string): Promise<boolean> {
+      const stream = getStreamForSession(sessionId);
+      if (stream) {
+        stream.notifyItemFailed(mfcId, error);
+        return true;
+      }
       return webhookClient.notifyItemFailed(sessionId, mfcId, error);
     },
 
     async notifyItemSkipped(sessionId: string, mfcId: string): Promise<boolean> {
+      const stream = getStreamForSession(sessionId);
+      if (stream) {
+        stream.notifyItemSkipped(mfcId);
+        return true;
+      }
       return webhookClient.notifyItemSkipped(sessionId, mfcId);
     },
 
@@ -291,6 +308,11 @@ function createWebhookService(): WebhookService {
         isOrphan?: boolean;
       }>;
     }): Promise<boolean> {
+      const stream = getStreamForSession(payload.sessionId);
+      if (stream) {
+        stream.notifyPhaseChange(payload.phase, payload.message, payload.items);
+        return true;
+      }
       return webhookClient.notifyPhaseChange(payload);
     },
 
@@ -309,6 +331,11 @@ function createWebhookService(): WebhookService {
         mfcCreatedAt?: string;
       }>;
     }): Promise<boolean> {
+      const stream = getStreamForSession(payload.sessionId);
+      if (stream) {
+        stream.notifyListsSync(payload.lists);
+        return true;
+      }
       return webhookClient.notifyListsSync(payload);
     },
   };
