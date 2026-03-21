@@ -227,7 +227,6 @@ export class BrowserPool {
         '--no-first-run',
         '--no-zygote',
         '--disable-gpu',
-        '--disable-web-security',
         '--disable-extensions',
         '--disable-background-timer-throttling',
         '--disable-backgrounding-occluded-windows',

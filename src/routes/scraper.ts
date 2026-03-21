@@ -50,10 +50,11 @@ router.post('/scrape', async (req, res) => {
 
   } catch (error: any) {
     console.error('[SCRAPER API] Error:', error);
+    const isProd = process.env.NODE_ENV === 'production';
     res.status(500).json({
       success: false,
-      message: error.message || 'Scraping failed',
-      error: error.message
+      message: isProd ? 'Scraping failed' : (error.message || 'Scraping failed'),
+      ...(isProd ? {} : { error: error.message }),
     });
   }
 });

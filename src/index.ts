@@ -15,6 +15,7 @@ import {
 import { EngineRuntimeConfig } from './plugin-api/runtime-config';
 import { createEngineServices } from './plugin-api/engine-services';
 import type { PluginContext } from './plugin-api/types';
+import { serviceAuth } from './middleware/serviceAuth';
 
 dotenv.config();
 
@@ -28,7 +29,32 @@ const PORT = process.env.PORT || 3080;
 let loadedPlugins: LoadedPlugin[] = [];
 
 // Middleware
-app.use(cors());
+// Scraper is an internal service — restrict CORS to backend origin only
+const SCRAPER_ALLOWED_ORIGINS = [
+  process.env.BACKEND_URL,
+  ...(process.env.CORS_ALLOWED_ORIGINS?.split(',') ?? []),
+].filter(Boolean);
+
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow requests with no origin (server-to-server calls from backend)
+    if (!origin) {
+      callback(null, true);
+      return;
+    }
+    // In development, allow localhost origins
+    if (process.env.NODE_ENV !== 'production' && /^https?:\/\/localhost(:\d+)?$/.test(origin)) {
+      callback(null, true);
+      return;
+    }
+    if (SCRAPER_ALLOWED_ORIGINS.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+    callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+}));
 app.use(express.json());
 
 // Health check endpoints
@@ -62,10 +88,11 @@ app.get('/health/detailed', async (req, res) => {
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
+    const isProd = process.env.NODE_ENV === 'production';
     res.status(500).json({
       ...healthResponse(),
       status: 'degraded',
-      error: error instanceof Error ? error.message : 'Unknown error',
+      ...(isProd ? {} : { error: error instanceof Error ? error.message : 'Unknown error' }),
     });
   }
 });
@@ -78,6 +105,11 @@ app.get('/version', (req, res) => {
     status: 'ok'
   });
 });
+
+// Service auth middleware for scraper routes (health/version endpoints are public)
+app.use('/scrape', serviceAuth);
+app.use('/configs', serviceAuth);
+app.use('/reset-pool', serviceAuth);
 
 // Scraper routes (no /api prefix for consistency)
 app.use('/', scraperRoutes);
