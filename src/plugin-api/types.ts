@@ -8,6 +8,7 @@
 
 import type { Router } from 'express';
 import type { ExtractionRegistry } from '../layers/extraction/registry';
+import type { DomainRateLimit } from '../infrastructure/types';
 
 /**
  * Contract for scraper plugins. Plugins implement this interface
@@ -45,8 +46,20 @@ export interface PluginLogger {
 }
 
 export interface RuntimeConfig {
+  /** Get a config value by key */
   get(key: string): unknown;
+  /** Get typed config value with default */
+  getOrDefault<T>(key: string, defaultValue: T): T;
+  /** Check a feature flag for a site */
   getFeatureFlag(site: string, feature: string): boolean;
+  /** Get rate limit override for a site (returns undefined if no override) */
+  getRateLimitOverride(site: string): Partial<DomainRateLimit> | undefined;
+  /** Set a default value (used by plugins during registration) */
+  setDefault(key: string, value: unknown): void;
+  /** Refresh dynamic config from external sources */
+  refresh(): Promise<void>;
+  /** Check if config source is available */
+  isHealthy(): boolean;
 }
 
 // ============================================================================

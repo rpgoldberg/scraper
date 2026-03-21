@@ -53,6 +53,11 @@ export type { LoadedPlugin, RequireFn } from './loader';
 
 // Runtime config implementation
 export { EngineRuntimeConfig } from './runtime-config';
+export type { EngineRuntimeConfigOptions } from './runtime-config';
+
+// Config layer types and implementations
+export type { ConfigLayer, HttpConfigLayerOptions } from './config-layers';
+export { DefaultsLayer, EnvConfigLayer, HttpConfigLayer } from './config-layers';
 
 // Engine services factory (used by the engine at startup)
 export { createEngineServices } from './engine-services';
