@@ -1,0 +1,97 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scraper
+  namespace: figurecollecting
+  labels:
+    app: scraper
+    app.kubernetes.io/name: scraper
+    app.kubernetes.io/part-of: figure-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scraper
+  template:
+    metadata:
+      labels:
+        app: scraper
+        app.kubernetes.io/name: scraper
+        app.kubernetes.io/part-of: figure-collector
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 995
+        runAsGroup: 995
+        fsGroup: 995
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: scraper
+          image: ghcr.io/figurecollecting/scraper:develop
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3050
+              name: http
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: scraper-config
+          env:
+            - name: SERVICE_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: fc-backend-secrets
+                  key: SERVICE_AUTH_TOKEN
+          resources:
+            requests:
+              cpu: 200m
+              memory: 1Gi
+            limits:
+              cpu: 1000m
+              # 3Gi total because the 2Gi /dev/shm emptyDir counts against cgroup memory
+              memory: 3Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            # Chrome needs writable temp dirs for profile, crash dumps, etc.
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3050
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3050
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 3050
+            # 120s max startup: 24 attempts * 5s = 120s (Chrome init can be slow)
+            periodSeconds: 5
+            failureThreshold: 24
+          volumeMounts:
+            # Equivalent to Docker shm_size: 2gb — Chrome needs large shared memory
+            - name: dshm
+              mountPath: /dev/shm
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 2Gi
+        - name: tmp
+          emptyDir: {}

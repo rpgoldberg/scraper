@@ -1,0 +1,44 @@
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: scraper-policy
+  namespace: figurecollecting
+spec:
+  podSelector:
+    matchLabels:
+      app: scraper
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow traffic from fc-backend only
+    - from:
+        - podSelector:
+            matchLabels:
+              app: fc-backend
+      ports:
+        - protocol: TCP
+          port: 3050
+  egress:
+    # Allow egress to external HTTP/HTTPS for web scraping
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 443
+    # Allow egress to fc-backend for webhook callbacks
+    - to:
+        - podSelector:
+            matchLabels:
+              app: fc-backend
+      ports:
+        - protocol: TCP
+          port: 5050

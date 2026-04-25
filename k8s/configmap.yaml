@@ -1,0 +1,18 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scraper-config
+  namespace: figurecollecting
+  labels:
+    app: scraper
+    app.kubernetes.io/name: scraper
+    app.kubernetes.io/part-of: figure-collector
+data:
+  NODE_ENV: production
+  PORT: "3050"
+  PUPPETEER_EXECUTABLE_PATH: /opt/chrome/chrome
+  PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
+  PUPPETEER_SKIP_DOWNLOAD: "true"
+  MFC_ALLOWED_COOKIES: PHPSESSID,sesUID,sesDID,cf_clearance
+  BACKEND_URL: http://fc-backend:5050
